@@ -40,11 +40,13 @@ class SwiftCheckpointNormalizer(CheckpointNormalizer):
         if not native_dir.exists():
             raise CheckpointError(f"swift native dir missing: {native_dir}")
 
-        # swift produces ``output_dir/checkpoint-<step>/`` plus a ``best`` symlink.
-        latest_dir, step = self._latest_checkpoint(native_dir)
+        # swift v4 creates a versioned subdir (v0-YYYYMMDD-HHMMSS/) inside
+        # the output_dir; v2/v3 write directly into output_dir.
+        effective_root = self._find_effective_root(native_dir)
+
+        latest_dir, step = self._latest_checkpoint(effective_root)
         if latest_dir is None:
-            # Some swift runs save directly into native_dir
-            latest_dir, step = native_dir, None
+            latest_dir, step = effective_root, None
 
         final_dir = self._ensure_final_dir(output_dir)
         is_lora = self._copy_into_final(latest_dir, final_dir)
@@ -63,7 +65,7 @@ class SwiftCheckpointNormalizer(CheckpointNormalizer):
         self._copy_recipe(Path(recipe_yaml_path), final_dir)
 
         # mirror non-final checkpoints under output_dir/checkpoints/
-        self._mirror_intermediate(native_dir, Path(output_dir) / "checkpoints")
+        self._mirror_intermediate(effective_root, Path(output_dir) / "checkpoints")
 
         base_model = self._read_base_model(latest_dir) or ""
         ck = NormalizedCheckpoint(
@@ -78,6 +80,21 @@ class SwiftCheckpointNormalizer(CheckpointNormalizer):
         return ck
 
     # -------- helpers --------
+
+    def _find_effective_root(self, native_dir: Path) -> Path:
+        """Find the actual model output root.
+
+        swift v4 nests output inside a versioned subdir like ``v0-20260630-160730/``.
+        Pick the latest one; fall back to native_dir itself for older swift.
+        """
+        versioned = []
+        for child in native_dir.iterdir():
+            if child.is_dir() and child.name.startswith("v") and "-" in child.name:
+                versioned.append(child)
+        if versioned:
+            versioned.sort(key=lambda p: p.name)
+            return versioned[-1]
+        return native_dir
 
     def _latest_checkpoint(self, native_dir: Path) -> tuple[Optional[Path], Optional[int]]:
         best = None

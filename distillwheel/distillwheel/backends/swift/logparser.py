@@ -69,8 +69,8 @@ class SwiftLogParser(LogParser):
             k: v
             for k, v in data.items()
             if k not in {"step", "global_step", "iter", "loss", "learning_rate",
-                         "lr", "grad_norm", "grad_norm_clipped", "epoch", "kl",
-                         "kl_div", "reward", "reward_mean"}
+                        "lr", "grad_norm", "grad_norm_clipped", "epoch", "kl",
+                        "kl_div", "reward", "reward_mean"}
         }
 
         return Metric(

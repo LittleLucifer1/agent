@@ -30,15 +30,15 @@ def swift_subcommand_for(stage: str) -> tuple[str, str | None]:
 
 def _peft_block(recipe: Recipe) -> Dict[str, Any]:
     if recipe.peft is None or recipe.peft.type == "full":
-        return {"sft_type": "full"}
+        return {"tuner_type": "full"}
     block = {
-        "sft_type": "lora" if recipe.peft.type == "lora" else "qlora",
+        "tuner_type": "lora" if recipe.peft.type == "lora" else "qlora",
         "lora_rank": recipe.peft.r,
         "lora_alpha": recipe.peft.alpha,
         "lora_dropout": recipe.peft.dropout,
     }
     if recipe.peft.target_modules:
-        block["lora_target_modules"] = list(recipe.peft.target_modules)
+        block["target_modules"] = list(recipe.peft.target_modules)
     return block
 
 
@@ -63,8 +63,9 @@ def recipe_to_swift_args(recipe: Recipe, data_path: Path, cfg_path: Path) -> Pat
         "seed": recipe.train.seed,
         "save_steps": recipe.io.save_steps,
         "logging_steps": recipe.io.logging_steps,
-        "bf16": recipe.precision == "bf16",
-        "fp16": recipe.precision == "fp16",
+        "torch_dtype": {"bf16": "bfloat16", "fp16": "float16", "fp8": "float8"}.get(
+            recipe.precision, "bfloat16"
+        ),
     }
     cfg.update(_peft_block(recipe))
 
@@ -84,8 +85,6 @@ def recipe_to_swift_args(recipe: Recipe, data_path: Path, cfg_path: Path) -> Pat
     # ZeRO stage if any
     if recipe.parallel.zero_stage:
         cfg["deepspeed"] = f"zero{recipe.parallel.zero_stage}"
-
-    cfg["__subcommand__"] = cmd  # consumed by the launcher; stripped before swift sees it
 
     cfg_path = Path(cfg_path)
     cfg_path.parent.mkdir(parents=True, exist_ok=True)

@@ -24,7 +24,7 @@ class SwiftAdapter(BackendAdapter):
     env_spec = EnvSpec(
         venv_path=Path(".venvs/swift"),
         python_executable=Path(".venvs/swift/bin/python"),
-        required_packages=["ms-swift>=2.5", "transformers>=4.43", "peft>=0.11"],
+        required_packages=["ms-swift>=4.0", "transformers>=4.43", "peft>=0.11"],
         health_check_cmd=None,
     )
 

@@ -3,6 +3,84 @@
 The IR layer stores **raw text only**: no tokenization, no chat-template
 application. Each backend's ``prepare_data`` is responsible for translating
 the IR into its native format (JSONL, parquet, ...).
+
+Field usage by task_type
+========================
+
+Each task_type only requires a subset of Sample fields. The table below
+shows which fields are **required (R)**, **optional (O)**, or **unused (-)** :
+
++-------------+----------+--------+--------+----------+------------+-------+-------+--------+
+| field       | sft      | preference (DPO) | kto      | rl_prompt  | notes                  |
++=============+==========+==================+==========+============+========================+
+| id          |  R       |  R               |  R       |  R         | 全局唯一标识            |
+| task_type   |  R       |  R               |  R       |  R         | 决定校验规则和路由      |
+| messages    |  R       |  -               |  -       |  -         | 完整多轮对话            |
+| prompt      |  -       |  R               |  R       |  R         | 用户问题/提示           |
+| chosen      |  -       |  R               |  -       |  -         | 偏好学习的好回答        |
+| rejected    |  -       |  R               |  -       |  -         | 偏好学习的差回答        |
+| completion  |  -       |  -               |  R       |  -         | 单条回答(供KTO打分)     |
+| label       |  -       |  -               |  R       |  -         | True=好/False=差        |
+| tools       |  O       |  -               |  -       |  -         | function calling 定义   |
+| images      |  O       |  O               |  O       |  O         | 多模态(v1保留未实现)    |
+| meta        |  O       |  O               |  O       |  O         | 透传业务自定义字段      |
++-------------+----------+------------------+----------+------------+------------------------+
+
+Examples
+========
+**SFT** — supervised fine-tuning, 完整多轮对话, 最后一条 assistant 消息就是要学的目标:
+    Sample(
+        id="sft_001",
+        task_type="sft",
+        messages=[
+            Message(role="system",    content="你是一个数学助手"),
+            Message(role="user",      content="1+1等于几？"),
+            Message(role="assistant", content="1+1等于2。"),
+        ],
+    )
+
+**SFT + tool calling** — 教模型学会调用函数:
+    Sample(
+        id="sft_tool_001",
+        task_type="sft",
+        messages=[
+            Message(role="user",      content="北京今天天气怎么样？"),
+            Message(role="assistant", content="",
+                    tool_calls=[{"id": "call_1", "type": "function",
+                                "function": {"name": "get_weather", "arguments": '{"city":"北京"}'}}]),
+            Message(role="tool",      content='{"temp":28,"desc":"晴"}',
+                    tool_call_id="call_1"),
+            Message(role="assistant", content="北京今天28°C，晴天。"),
+        ],
+        tools=[{"type": "function",
+                "function": {"name": "get_weather",
+                            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}],
+    )
+
+**Preference / DPO** — 给同一个 prompt 提供好/坏两个回答，训练偏好:
+    Sample(
+        id="dpo_001",
+        task_type="preference",
+        prompt="请用一句话解释量子纠缠",                     # 也可以是 list[Message]
+        chosen="量子纠缠是两个粒子无论距离多远都能瞬间相互关联的现象。",
+        rejected="量子纠缠就是两个东西绑在一起。",
+    )
+
+**KTO** — 单条回答 + 二元标签(好/差), 不需要配对:
+    Sample(
+        id="kto_001",
+        task_type="kto",
+        prompt="写一首关于春天的诗",
+        completion="春风又绿江南岸，明月何时照我还。",
+        label=True,   # True=好回答, False=差回答
+    )
+
+**RL / GRPO** — 只有 prompt, 模型自己 rollout 生成回答, reward function 打分:
+    Sample(
+        id="rl_001",
+        task_type="rl_prompt",
+        prompt="求解方程 2x + 3 = 7",                       # 也可以是 list[Message]
+    )
 """
 
 from __future__ import annotations
@@ -16,10 +94,11 @@ Role = Literal["system", "user", "assistant", "tool"]
 
 @dataclass
 class Message:
-    role: Role
-    content: str
-    tool_calls: Optional[List[dict]] = None
-    tool_call_id: Optional[str] = None
+    """对话中的单条消息。"""
+    role: Role                                   # system / user / assistant / tool
+    content: str                                 # 消息正文
+    tool_calls: Optional[List[dict]] = None      # assistant 发起的函数调用 (SFT tool-calling)
+    tool_call_id: Optional[str] = None           # tool 消息关联的 call id
 
     def to_dict(self) -> dict:
         d = {"role": self.role, "content": self.content}
@@ -50,17 +129,32 @@ class Sample:
     :meth:`validate` enforces the per-task field requirements.
     """
 
-    id: str
-    task_type: TaskType
+    # ── 通用字段 (所有 task_type 都需要) ──────────────────────────────
+    id: str                                      # 样本唯一标识
+    task_type: TaskType                          # 决定哪些字段必填, 以及数据如何被消费
+
+    # ── SFT 字段 ─────────────────────────────────────────────────────
+    # 完整多轮对话, 最后一条 assistant 消息 = 训练目标
     messages: Optional[List[Message]] = None
+
+    # ── Preference (DPO) + KTO + RL 共用 ────────────────────────────
+    # 用户输入/提示; DPO 和 KTO 用它做条件, RL 用它做 rollout 起点
     prompt: MessageOrText = None
-    chosen: MessageOrText = None
-    rejected: MessageOrText = None
-    completion: Optional[str] = None
-    label: Union[bool, float, None] = None
-    tools: Optional[List[dict]] = None
-    images: Optional[List[str]] = None
-    meta: dict = field(default_factory=dict)
+
+    # ── Preference (DPO) 专用 ────────────────────────────────────────
+    # 同一 prompt 下的好回答和差回答, 成对出现
+    chosen: MessageOrText = None                 # 偏好学习: 好的回答
+    rejected: MessageOrText = None               # 偏好学习: 差的回答
+
+    # ── KTO 专用 ─────────────────────────────────────────────────────
+    # 单条回答 + 二元标签, 不需要 chosen/rejected 配对
+    completion: Optional[str] = None             # 待评价的回答
+    label: Union[bool, float, None] = None       # True/1.0=好, False/0.0=差
+
+    # ── 可选扩展 (所有 task_type 均可携带) ───────────────────────────
+    tools: Optional[List[dict]] = None           # function calling 的工具定义 (主要用于 SFT)
+    images: Optional[List[str]] = None           # 多模态图片路径/URL (v1 保留, 暂未实现)
+    meta: dict = field(default_factory=dict)     # 业务自定义透传字段, 不影响训练逻辑
 
     def validate(self) -> None:
         """Validate field combinations against ``task_type``.

@@ -11,8 +11,6 @@ import sys
 from pathlib import Path
 from typing import List
 
-import yaml
-
 from ...core.envspec import EnvSpec
 from ...core.ir.recipe import Recipe
 from ...core.launcher import Launcher, filter_env
@@ -43,11 +41,10 @@ class SwiftCLILauncher(Launcher):
         self._native_out.mkdir(parents=True, exist_ok=True)
 
     def command(self) -> List[str]:
-        with open(self._config_path, "r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-        subcmd = cfg.get("__subcommand__", "sft")
+        from .recipe_mapper import swift_subcommand_for
 
-        # Prefer the `swift` console-script in the venv; fall back to module.
+        subcmd, _ = swift_subcommand_for(self._recipe.stage)
+
         bin_dir = self.env_spec.python_executable.parent
         swift_bin = bin_dir / ("swift.exe" if os.name == "nt" else "swift")
         if swift_bin.exists():
