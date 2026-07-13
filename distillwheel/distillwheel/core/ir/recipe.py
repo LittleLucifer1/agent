@@ -1,7 +1,118 @@
 """Recipe IR — declarative description of *what* to train.
 
 A Recipe is the user-facing schema. Each backend translates it into its
-native config (swift YAML, verl hydra overrides, ...).
+native config (swift YAML, verl hydra overrides, ...)
+=============
+
+不同 stage 会被路由到不同 backend (见 ``core/router.py``)::
+
+    SFT / DPO / KTO  →  swift backend
+    GRPO / PPO / RLOO / OPD  →  verl backend
+
+用户也可以通过 ``backend_hint`` 强制指定。
+
+Sub-config 组成
+================
+
+一个 Recipe 由以下子配置组合而成::
+
+    Recipe
+    ├── train:     TrainConfig      训练超参 (epoch, batch, 序列长度 ...)
+    ├── optim:     OptimConfig      优化器 (lr, scheduler, warmup ...)
+    ├── io:        IOConfig         输入输出 (output_dir, save/log 频率 ...)
+    ├── peft:      PEFTConfig       参数高效微调 (LoRA/QLoRA/全参)
+    ├── parallel:  ParallelConfig   并行策略 (DP/TP/PP/ZeRO)
+    └── rl:        RLConfig         强化学习专用 (KL, clip, rollout ...) — 仅 RL stage 需要
+
+SFT (LoRA)
+==========================
+    stage: sft
+    base_model: Qwen/Qwen2.5-7B
+    target_template: qwen                       # 强制 chat template, 保证行为一致
+
+    train:
+      epochs: 3
+      global_batch: 32                          # 有效 batch = micro_batch × grad_accum × dp
+      micro_batch: 2
+      grad_accum: 8
+      max_len: 4096
+      seed: 42
+
+    optim:
+      lr: 1e-4
+      scheduler: cosine
+      warmup_ratio: 0.05
+
+    peft:
+      type: lora
+      r: 64
+      alpha: 128
+      target_modules: [q_proj, k_proj, v_proj, o_proj]
+      dropout: 0.05
+
+    io:
+      output_dir: outputs/qwen7b-sft-lora
+      save_steps: 200
+      logging_steps: 10
+
+DPO
+===================
+    stage: dpo
+    base_model: Qwen/Qwen2.5-7B
+    target_template: qwen
+
+    train:
+      epochs: 1
+      global_batch: 16
+      micro_batch: 1
+      grad_accum: 16
+      max_len: 2048
+
+    optim:
+      lr: 5e-6 
+      scheduler: cosine
+      warmup_ratio: 0.1
+
+    peft:
+      type: lora
+      r: 32
+      alpha: 64
+
+    io:
+      output_dir: outputs/qwen7b-dpo
+
+GRPO (强化学习)
+==============================
+    stage: grpo
+    base_model: Qwen/Qwen2.5-7B
+    target_template: qwen
+
+    train:
+      epochs: 1
+      global_batch: 64
+      micro_batch: 1
+      max_len: 4096
+
+    optim:
+      lr: 1e-6                                  # RL 学习率通常很小
+      scheduler: cosine
+
+    rl:                                          # ← RL stage 必填
+      kl_coef: 0.05                             # KL 散度惩罚系数
+      clip: 0.2                                 # PPO clip ratio
+      rollout_n: 4                              # 每个 prompt 采样几条回答
+      rollout_engine: vllm                      # 推理引擎: vllm 或 sglang
+      reward_fn_ref: my_rewards:math_reward     # 奖励函数引用 "module:fn_name"
+
+    parallel:
+      tp: 2                                     # tensor parallel (需要多卡)
+
+    peft:
+      type: full                                # RL 一般全参训练
+
+    io:
+      output_dir: outputs/qwen7b-grpo
+      save_steps: 100
 """
 
 from __future__ import annotations
@@ -9,8 +120,12 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
+<<<<<<< HEAD
 from collections.abc import Mapping
 from typing import Any, Literal, Optional
+=======
+from typing import Any, List, Literal, Optional
+>>>>>>> 67e62d2cdb9b79eef20cf4f3e7a520c5a169609a
 
 from ..errors import IRValidationError
 
@@ -30,70 +145,92 @@ _ROLLOUT_ENGINES = {"vllm", "sglang"}
 
 @dataclass
 class PEFTConfig:
-    type: PEFTType = "lora"
-    r: int = 16
-    alpha: int = 32
-    target_modules: list = field(default_factory=list)
-    dropout: float = 0.0
+    """参数高效微调配置。type="full" 表示全参训练(不使用 PEFT)。"""
+    type: PEFTType = "lora"                      # lora / qlora / full
+    r: int = 16                                  # LoRA 秩
+    alpha: int = 32                              # LoRA alpha (缩放 = alpha/r)
+    target_modules: List[str] = field(default_factory=list)  # 应用 LoRA 的模块名
+    dropout: float = 0.0                         # LoRA dropout
 
 
 @dataclass
 class OptimConfig:
-    lr: float = 5e-5
-    scheduler: str = "cosine"
-    warmup_ratio: float = 0.03
-    weight_decay: float = 0.0
+    """优化器配置。"""
+    lr: float = 5e-5                             # 学习率
+    scheduler: str = "cosine"                    # lr scheduler 类型
+    warmup_ratio: float = 0.03                   # warmup 占总步数的比例
+    weight_decay: float = 0.0                    # 权重衰减
 
 
 @dataclass
 class TrainConfig:
+<<<<<<< HEAD
     epochs: float = 1.0
     global_batch: int = 32
     micro_batch: int = 1
     grad_accum: int = 32
     max_len: int = 4096
     seed: int = 42
+=======
+    """训练超参。有效 batch size = micro_batch × grad_accum × dp。"""
+    epochs: float = 1.0                          # 训练轮数
+    global_batch: int = 32                       # 全局 batch size
+    micro_batch: int = 1                         # 单卡单步 batch size
+    grad_accum: int = 1                          # 梯度累积步数
+    max_len: int = 4096                          # 最大序列长度
+    seed: int = 42                               # 随机种子
+>>>>>>> 67e62d2cdb9b79eef20cf4f3e7a520c5a169609a
 
 
 @dataclass
 class ParallelConfig:
-    dp: int = 1
-    tp: int = 1
-    pp: int = 1
-    zero_stage: int = 0
+    """分布式并行策略。"""
+    dp: int = 1                                  # 数据并行度
+    tp: int = 1                                  # 张量并行度 (模型切分到多卡)
+    pp: int = 1                                  # 流水线并行度
+    zero_stage: int = 0                          # DeepSpeed ZeRO stage (0/1/2/3)
 
 
 @dataclass
 class RLConfig:
-    kl_coef: float = 0.05
-    clip: float = 0.2
-    rollout_n: int = 4
-    rollout_engine: Literal["vllm", "sglang"] = "vllm"
-    reward_fn_ref: Optional[str] = None  # "module.path:fn_name"
+    """强化学习专用配置。仅当 stage 为 grpo/ppo/rloo/opd 时需要。"""
+    kl_coef: float = 0.05                        # KL 散度惩罚系数 (约束策略不偏离参考模型太远)
+    clip: float = 0.2                            # PPO/GRPO clip ratio
+    rollout_n: int = 4                           # 每个 prompt 采样的回答数
+    rollout_engine: Literal["vllm", "sglang"] = "vllm"  # rollout 推理引擎
+    reward_fn_ref: Optional[str] = None          # 奖励函数引用, 格式 "module.path:fn_name"
 
 
 @dataclass
 class IOConfig:
-    output_dir: str
-    save_steps: int = 500
-    logging_steps: int = 10
-    resume_from: Optional[str] = None
+    """输入输出配置。"""
+    output_dir: str                              # 输出根目录
+    save_steps: int = 500                        # 每 N 步保存 checkpoint
+    logging_steps: int = 10                      # 每 N 步记录指标
+    resume_from: Optional[str] = None            # 断点续训的 checkpoint 路径
 
 
 @dataclass
 class Recipe:
-    stage: Stage
-    base_model: str
-    train: TrainConfig
-    optim: OptimConfig
-    io: IOConfig
-    peft: Optional[PEFTConfig] = None
-    precision: Precision = "bf16"
-    parallel: ParallelConfig = field(default_factory=ParallelConfig)
-    rl: Optional[RLConfig] = None
-    target_template: Optional[str] = None       # forced chat template name
-    backend_hint: Optional[str] = None          # user override for routing
-    meta: dict = field(default_factory=dict)
+    """训练配方 — 声明 "训练什么、怎么训练"，由 backend adapter 翻译成框架原生配置。"""
+
+    # ── 必填 ──────────────────────────────────────────────────
+    stage: Stage                                 # 训练方法: sft/dpo/kto/grpo/ppo/rloo/opd
+    base_model: str                              # HuggingFace 模型路径或本地路径
+    train: TrainConfig                           # 训练超参
+    optim: OptimConfig                           # 优化器配置
+    io: IOConfig                                 # 输入输出配置
+
+    # ── 可选子配置 ───────────────────────────────────────────────────
+    peft: Optional[PEFTConfig] = None            # LoRA/QLoRA 配置, None = 全参训练
+    precision: Precision = "bf16"                # 训练精度
+    parallel: ParallelConfig = field(default_factory=ParallelConfig)  # 并行策略
+    rl: Optional[RLConfig] = None                # RL 配置 — grpo/ppo/rloo/opd 必填
+
+    # ── 路由与兼容 ───────────────────────────────────────────────────
+    target_template: Optional[str] = None        # 强制 chat template 名称, 保证跨框架行为一致
+    backend_hint: Optional[str] = None           # 强制指定 backend (跳过默认路由)
+    meta: dict = field(default_factory=dict)     # 透传给 backend 的自定义字段
 
     # ---------- validation ----------
 
@@ -146,6 +283,7 @@ class Recipe:
         if self.peft is not None:
             if self.peft.type not in _PEFT_TYPES:
                 raise IRValidationError(
+<<<<<<< HEAD
                     f"unknown peft.type={self.peft.type!r}; expected one of {sorted(_PEFT_TYPES)}"
                 )
             _require_positive_int(self.peft.r, "peft.r")
@@ -187,6 +325,13 @@ class Recipe:
             # still treat None as "framework default" but emit a warning.
             # We treat missing as a soft validation issue, not fatal.
             pass
+=======
+                    f"recipe.rl is required for stage={self.stage}")
+        if self.train.global_batch < self.train.micro_batch:
+            raise IRValidationError("global_batch must be >= micro_batch")
+        if self.train.epochs <= 0:
+            raise IRValidationError("train.epochs must be > 0")
+>>>>>>> 67e62d2cdb9b79eef20cf4f3e7a520c5a169609a
 
     # ---------- serialization ----------
 

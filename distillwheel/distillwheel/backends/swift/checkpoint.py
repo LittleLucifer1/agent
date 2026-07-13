@@ -99,6 +99,21 @@ class SwiftCheckpointNormalizer(CheckpointNormalizer):
 
     # -------- discovery --------
 
+    def _find_effective_root(self, native_dir: Path) -> Path:
+        """Find the actual model output root.
+
+        swift v4 nests output inside a versioned subdir like ``v0-20260630-160730/``.
+        Pick the latest one; fall back to native_dir itself for older swift.
+        """
+        versioned = []
+        for child in native_dir.iterdir():
+            if child.is_dir() and child.name.startswith("v") and "-" in child.name:
+                versioned.append(child)
+        if versioned:
+            versioned.sort(key=lambda p: p.name)
+            return versioned[-1]
+        return native_dir
+
     def _latest_checkpoint(self, native_dir: Path) -> tuple[Optional[Path], Optional[int]]:
         candidates: list[tuple[int, str, Path]] = []
         for child in native_dir.rglob("checkpoint-*"):

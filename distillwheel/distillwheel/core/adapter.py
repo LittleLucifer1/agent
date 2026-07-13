@@ -18,7 +18,7 @@ from .ir.sample import SampleStream
 from .launcher import Launcher
 from .logparser import LogParser
 
-
+# 负责将上游的 sample IR 和 recipe IR 转换成指定后端的 data + config
 class BackendAdapter(ABC):
     """Single entry point for a training framework.
 
