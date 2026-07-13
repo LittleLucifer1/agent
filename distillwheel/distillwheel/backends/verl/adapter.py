@@ -1,4 +1,4 @@
-"""VerlAdapter — verl integration for GRPO / PPO / RLOO / OPD.
+"""VERL 0.8 adapter for GRPO, PPO and RLOO.
 
 Like the swift adapter, this module never imports ``verl`` itself in the
 main process. The training code only runs inside the launcher's
@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ...core.adapter import BackendAdapter
-from ...core.envspec import EnvSpec
+from ...core.envspec import backend_env_spec
 from .checkpoint import VerlCheckpointNormalizer
 from .data_writer import write_verl_parquet
 from .launcher import VerlRayLauncher
@@ -20,11 +20,16 @@ from .recipe_mapper import recipe_to_verl_overrides
 
 class VerlAdapter(BackendAdapter):
     name = "verl"
-    supported_stages = ("grpo", "ppo", "rloo", "opd")
-    env_spec = EnvSpec(
-        venv_path=Path(".venvs/verl"),
-        python_executable=Path(".venvs/verl/bin/python"),
-        required_packages=["verl", "ray", "vllm", "pyarrow"],
+    supported_stages = ("grpo", "ppo", "rloo")
+    env_spec = backend_env_spec(
+        "verl",
+        required_packages=["verl==0.8.0", "ray>=2.41", "vllm>=0.8.5", "pyarrow>=19"],
+        cuda_constraint=">=12.8",
+        health_check_cmd=[
+            "python", "-c",
+            "import importlib.metadata as m; import ray, vllm, pyarrow; "
+            "v=m.version('verl'); assert v=='0.8.0', v; print(v)",
+        ],
     )
 
     def prepare_data(self, stream, recipe, workdir):

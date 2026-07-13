@@ -1,16 +1,15 @@
-"""Ray-job launcher for verl.
+"""Direct subprocess launcher for VERL 0.8.
 
-Two execution modes (auto-selected by env):
-
-1. **Standalone**: ``python -m verl.trainer.main_ppo +overrides=...``
-   when ``RAY_ADDRESS`` is unset.
-2. **Cluster**: ``ray job submit --address $RAY_ADDRESS -- python -m verl...``
-   when a Ray cluster is already running.
+VERL's ``main_ppo`` initialises or connects to Ray itself.  Wrapping it in
+``ray job submit`` changes the runtime environment and breaks local reward-file
+and interpreter assumptions, so DistillWheel always launches the resolved VERL
+Python directly.  When ``RAY_ADDRESS`` is present it is passed through and the
+VERL/Ray process connects to that cluster; the workdir and backend environment
+therefore need to be available on every worker node.
 """
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import List
 
@@ -19,15 +18,6 @@ from ...core.errors import EnvironmentNotReadyError
 from ...core.ir.recipe import Recipe
 from ...core.launcher import Launcher, filter_env
 from .recipe_mapper import load_overrides, verl_algorithm_for
-
-
-# verl trainer entry point per algorithm.
-_ENTRY_MODULE = {
-    "ppo": "verl.trainer.main_ppo",
-    "grpo": "verl.trainer.main_ppo",   # GRPO is invoked through the PPO trainer
-    "rloo": "verl.trainer.main_ppo",
-    "opd": "verl.trainer.main_ppo",
-}
 
 
 class VerlRayLauncher(Launcher):
@@ -39,45 +29,38 @@ class VerlRayLauncher(Launcher):
         workdir: Path,
     ):
         self.env_spec = env_spec
-        self._overrides_path = Path(overrides_path)
+        self._overrides_path = Path(overrides_path).expanduser().resolve()
         self._recipe = recipe
-        self._workdir = Path(workdir)
+        self._workdir = Path(workdir).expanduser().resolve()
         self._native_out = self._workdir / "verl_native"
 
     def prepare_env(self) -> None:
         if not self.env_spec.is_ready():
             raise EnvironmentNotReadyError(
-                f"verl venv not ready at {self.env_spec.venv_path}. "
-                "Run `python tools/setup_backend_envs.py verl` first."
+                f"VERL Python is not ready at {self.env_spec.python_executable}. "
+                "Set DISTILLWHEEL_VERL_PYTHON to an absolute interpreter or "
+                "run `python tools/setup_backend_envs.py verl`."
             )
+        if not self._overrides_path.is_file():
+            raise EnvironmentNotReadyError(f"VERL override file is missing: {self._overrides_path}")
+        self._workdir.mkdir(parents=True, exist_ok=True)
         self._native_out.mkdir(parents=True, exist_ok=True)
 
     def command(self) -> List[str]:
-        algo = verl_algorithm_for(self._recipe.stage)
-        entry = _ENTRY_MODULE[algo]
-        overrides = load_overrides(self._overrides_path)
-
-        py = str(self.env_spec.python_executable)
-        ray_address = os.environ.get("RAY_ADDRESS")
-        if ray_address:
-            argv = [
-                "ray", "job", "submit",
-                "--address", ray_address,
-                "--working-dir", str(self._workdir),
-                "--",
-                py, "-m", entry,
-            ]
-        else:
-            argv = [py, "-m", entry]
-        argv.extend(overrides)
-        return argv
+        verl_algorithm_for(self._recipe.stage)  # Validate before spawning.
+        python = self.env_spec.python_executable.expanduser().resolve()
+        return [
+            str(python),
+            "-m",
+            "verl.trainer.main_ppo",
+            *load_overrides(self._overrides_path),
+        ]
 
     def env(self) -> dict:
-        extra = {
-            # ensure verl writes into our managed workdir
+        return filter_env(extra={
+            "PYTHONUNBUFFERED": "1",
             "VERL_OUTPUT_DIR": str(self._native_out),
-        }
-        return filter_env(extra=extra)
+        })
 
     def collect_artifacts(self) -> Path:
         return self._native_out

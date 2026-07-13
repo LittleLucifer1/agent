@@ -51,5 +51,9 @@ class PreflightError(DistillWheelError):
     """Raised when the dry-run preflight check fails."""
 
 
+class OutputDirectoryError(DistillWheelError):
+    """The requested output directory is unsafe, busy, or already populated."""
+
+
 class HangDetectedError(TrainingFailedError):
     """Raised when no stdout has been observed for the configured timeout."""

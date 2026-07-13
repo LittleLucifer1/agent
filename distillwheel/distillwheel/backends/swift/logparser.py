@@ -1,12 +1,4 @@
-"""swift log parser — extracts loss / lr / grad_norm / kl from HF-Trainer-style lines.
-
-swift wraps HuggingFace Trainer, so each step prints a JSON-ish dict
-like::
-
-    {'loss': 1.234, 'learning_rate': 5e-5, 'epoch': 0.01, 'step': 10}
-
-There's also a `\\r`-progress-bar variant. We accept both.
-"""
+"""Parse ms-swift 4.4 / Hugging Face Trainer metric log lines."""
 
 from __future__ import annotations
 
@@ -20,6 +12,42 @@ from ...core.logparser import LogParser, extract_kv, now_ts
 
 
 _DICT_RE = re.compile(r"\{.*\}")
+_METRIC_KEYS = {
+    "loss",
+    "train/loss",
+    "train_loss",
+    "reward",
+    "reward_mean",
+    "rewards/mean",
+    "reward/mean",
+    "kl",
+    "kl_div",
+    "objective/kl",
+}
+_STEP_KEYS = ("step", "global_step", "iter", "global_step/max_steps")
+_LOSS_KEYS = ("loss", "train/loss", "train_loss")
+_LR_KEYS = ("learning_rate", "train/learning_rate", "lr")
+_GRAD_KEYS = ("grad_norm", "train/grad_norm", "grad_norm_clipped")
+_EPOCH_KEYS = ("epoch", "train/epoch")
+_KL_KEYS = ("kl", "kl_div", "objective/kl", "train/kl")
+_REWARD_MEAN_KEYS = ("reward", "reward_mean", "rewards/mean", "reward/mean")
+_REWARD_STD_KEYS = ("reward_std", "rewards/std", "reward/std")
+_POLICY_LOSS_KEYS = ("policy_loss", "loss/policy", "actor/policy_loss")
+_VALUE_LOSS_KEYS = ("value_loss", "loss/value", "critic/loss")
+_ENTROPY_KEYS = ("entropy", "policy/entropy", "actor/entropy")
+_CONSUMED_KEYS = set().union(
+    _STEP_KEYS,
+    _LOSS_KEYS,
+    _LR_KEYS,
+    _GRAD_KEYS,
+    _EPOCH_KEYS,
+    _KL_KEYS,
+    _REWARD_MEAN_KEYS,
+    _REWARD_STD_KEYS,
+    _POLICY_LOSS_KEYS,
+    _VALUE_LOSS_KEYS,
+    _ENTROPY_KEYS,
+)
 
 
 class SwiftLogParser(LogParser):
@@ -30,12 +58,12 @@ class SwiftLogParser(LogParser):
         if not line:
             return None
 
-        # Try strict JSON first (cheap), then python-literal-style dicts
-        # (HF Trainer prints these), then fall back to key=value extraction.
+        # ms-swift prints Python-literal dictionaries, often after an INFO
+        # prefix.  JSON and key=value forms are accepted as well.
         data = None
-        m = _DICT_RE.search(line)
-        if m is not None:
-            blob = m.group(0)
+        match = _DICT_RE.search(line)
+        if match is not None:
+            blob = match.group(0)
             try:
                 data = json.loads(blob)
             except json.JSONDecodeError:
@@ -46,51 +74,66 @@ class SwiftLogParser(LogParser):
 
         if not isinstance(data, dict):
             kv = extract_kv(line)
-            if "loss" not in kv and "reward" not in kv and "kl" not in kv:
+            if not any(key in kv for key in _METRIC_KEYS):
                 return None
             data = kv
 
-        step = data.get("step") or data.get("global_step") or data.get("iter")
+        step = _extract_step(data)
         if step is None:
             return None
-        try:
-            step = int(step)
-        except (TypeError, ValueError):
-            return None
-
-        loss = _as_float(data.get("loss"))
-        lr = _as_float(data.get("learning_rate") or data.get("lr"))
-        gn = _as_float(data.get("grad_norm") or data.get("grad_norm_clipped"))
-        epoch = _as_float(data.get("epoch"))
-        kl = _as_float(data.get("kl") or data.get("kl_div"))
-        reward = _as_float(data.get("reward") or data.get("reward_mean"))
-
-        extra = {
-            k: v
-            for k, v in data.items()
-            if k not in {"step", "global_step", "iter", "loss", "learning_rate",
-                         "lr", "grad_norm", "grad_norm_clipped", "epoch", "kl",
-                         "kl_div", "reward", "reward_mean"}
-        }
 
         return Metric(
             step=step,
             timestamp=now_ts(),
             stage=self.stage,
-            loss=loss,
-            learning_rate=lr,
-            grad_norm=gn,
-            epoch=epoch,
-            kl=kl,
-            reward_mean=reward,
-            extra=extra,
+            loss=_first_float(data, *_LOSS_KEYS),
+            learning_rate=_first_float(data, *_LR_KEYS),
+            grad_norm=_first_float(data, *_GRAD_KEYS),
+            epoch=_first_float(data, *_EPOCH_KEYS),
+            kl=_first_float(data, *_KL_KEYS),
+            reward_mean=_first_float(data, *_REWARD_MEAN_KEYS),
+            reward_std=_first_float(data, *_REWARD_STD_KEYS),
+            policy_loss=_first_float(data, *_POLICY_LOSS_KEYS),
+            value_loss=_first_float(data, *_VALUE_LOSS_KEYS),
+            entropy=_first_float(data, *_ENTROPY_KEYS),
+            extra={key: value for key, value in data.items() if key not in _CONSUMED_KEYS},
         )
 
 
-def _as_float(v) -> Optional[float]:
-    if v is None:
+def _extract_step(data: dict) -> Optional[int]:
+    for key in ("step", "global_step", "iter"):
+        if key not in data:
+            continue
+        try:
+            return int(data[key])
+        except (TypeError, ValueError):
+            pass
+
+    # Current ms-swift progress dictionaries use e.g. ``'1/840'``.
+    value = data.get("global_step/max_steps")
+    if isinstance(value, str):
+        match = re.match(r"^\s*(\d+)\s*/\s*\d+\s*$", value)
+        if match:
+            return int(match.group(1))
+    elif value is not None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _first_float(data: dict, *keys: str) -> Optional[float]:
+    for key in keys:
+        if key in data:
+            return _as_float(data[key])
+    return None
+
+
+def _as_float(value) -> Optional[float]:
+    if value is None:
         return None
     try:
-        return float(v)
+        return float(value)
     except (TypeError, ValueError):
         return None

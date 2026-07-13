@@ -1,0 +1,9 @@
+{"id":"d0","task_type":"preference","prompt":"What is 2 + 2?","chosen":"4","rejected":"5"}
+{"id":"d1","task_type":"preference","prompt":"中国的首都是哪里？","chosen":"北京。","rejected":"上海。"}
+{"id":"d2","task_type":"preference","prompt":"What is the chemical formula for water?","chosen":"H2O.","rejected":"CO2."}
+{"id":"d3","task_type":"preference","prompt":"Say hello.","chosen":"Hello!","rejected":"Goodbye!"}
+{"id":"d4","task_type":"preference","prompt":"What is 3 + 4?","chosen":"7","rejected":"8"}
+{"id":"d5","task_type":"preference","prompt":"法国的首都是哪里？","chosen":"巴黎。","rejected":"伦敦。"}
+{"id":"d6","task_type":"preference","prompt":"What gas do humans breathe?","chosen":"Oxygen.","rejected":"Carbon dioxide."}
+{"id":"d7","task_type":"preference","prompt":"Say goodbye.","chosen":"Goodbye!","rejected":"Hello!"}
+

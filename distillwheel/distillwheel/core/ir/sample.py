@@ -8,7 +8,10 @@ the IR into its native format (JSONL, parquet, ...).
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Iterable, Iterator, List, Literal, Optional, Protocol, Union, runtime_checkable
+
+from ..errors import IRValidationError
 
 TaskType = Literal["sft", "preference", "kto", "rl_prompt"]
 Role = Literal["system", "user", "assistant", "tool"]
@@ -118,13 +121,43 @@ class SampleStream(Protocol):
         ...
 
 
-def iter_samples_from_jsonl(path: str) -> Iterable[Sample]:
-    """Convenience: yield :class:`Sample` from a JSONL file."""
+def iter_samples_from_jsonl(path: str | Path) -> Iterable[Sample]:
+    """Yield validated samples and attach file/line context to input errors."""
     import json
 
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            yield Sample.from_dict(json.loads(line))
+    source = Path(path)
+    try:
+        with open(source, "r", encoding="utf-8") as f:
+            for line_number, line in enumerate(f, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    raw = json.loads(line)
+                    if not isinstance(raw, dict):
+                        raise IRValidationError("sample JSON value must be an object")
+                    sample = Sample.from_dict(raw)
+                    sample.validate()
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError, IRValidationError) as exc:
+                    raise IRValidationError(
+                        f"invalid sample at {source}:{line_number}: {exc}"
+                    ) from exc
+                yield sample
+    except OSError as exc:
+        raise IRValidationError(f"cannot read sample JSONL {source}: {exc}") from exc
+
+
+def validated_sample_stream(stream: Iterable[Sample], stage: str) -> Iterator[Sample]:
+    """Lazily enforce both the Sample schema and Recipe-stage compatibility."""
+    from .validators import validate_sample_for_stage
+
+    for index, sample in enumerate(stream, start=1):
+        if not isinstance(sample, Sample):
+            raise IRValidationError(
+                f"sample stream item {index} must be Sample, got {type(sample).__name__}"
+            )
+        try:
+            validate_sample_for_stage(sample, stage)
+        except IRValidationError as exc:
+            raise IRValidationError(f"sample stream item {index}: {exc}") from exc
+        yield sample

@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "distillwheel"
 version = "0.1.0"
-description = "Training backend adapter framework — IR-based orchestration with subprocess-isolated backends (swift, verl)."
+description = "Training backend adapter framework with IR-based, subprocess-isolated backends."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "DistillWheel" }]
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
 dependencies = [
     "pyyaml>=6.0",
 ]
@@ -18,13 +18,15 @@ dependencies = [
 dev = [
     "pytest>=7.0",
     "pytest-cov",
+    "build>=1.2",
 ]
 verl = [
-    "pyarrow>=14.0",
+    "pyarrow>=19.0",
 ]
 
 [project.scripts]
 distillwheel = "distillwheel.cli:main"
+distillwheel-setup-backends = "distillwheel.tools.setup_backend_envs:main"
 
 [project.entry-points."distillwheel.backends"]
 swift = "distillwheel.backends.swift"
@@ -32,6 +34,10 @@ verl = "distillwheel.backends.verl"
 
 [tool.setuptools.packages.find]
 include = ["distillwheel*"]
+
+[tool.setuptools.package-data]
+"distillwheel.backends.swift" = ["env.yaml"]
+"distillwheel.backends.verl" = ["env.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

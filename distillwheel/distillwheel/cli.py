@@ -33,6 +33,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         stream,
         skip_preflight=args.skip_preflight,
         heartbeat_timeout_s=args.heartbeat_timeout,
+        overwrite_output=args.overwrite_output,
     )
     print(f"normalized model at: {out / 'final'}")
     return 0
@@ -66,8 +67,13 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--recipe", required=True, type=Path)
     rp.add_argument("--data", required=True, type=Path)
     rp.add_argument("--skip-preflight", action="store_true")
-    rp.add_argument("--heartbeat-timeout", type=float, default=None,
+    rp.add_argument("--heartbeat-timeout", type=_positive_float, default=None,
                     help="kill the subprocess if no stdout for N seconds")
+    rp.add_argument(
+        "--overwrite-output",
+        action="store_true",
+        help="replace managed files in an existing DistillWheel output directory",
+    )
     rp.set_defaults(func=_cmd_run)
 
     lp = sub.add_parser("list-backends", help="list adapters currently registered")
@@ -88,6 +94,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     except DistillWheelError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)
+        return 130
+
+
+def _positive_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -1,0 +1,9 @@
+{"id":"s0","task_type":"sft","messages":[{"role":"user","content":"What is 2 + 2?"},{"role":"assistant","content":"4"}]}
+{"id":"s1","task_type":"sft","messages":[{"role":"user","content":"中国的首都是哪里？"},{"role":"assistant","content":"北京。"}]}
+{"id":"s2","task_type":"sft","messages":[{"role":"user","content":"Say hello."},{"role":"assistant","content":"Hello!"}]}
+{"id":"s3","task_type":"sft","messages":[{"role":"user","content":"What is the chemical formula for water?"},{"role":"assistant","content":"H2O."}]}
+{"id":"s4","task_type":"sft","messages":[{"role":"user","content":"What is 3 + 4?"},{"role":"assistant","content":"7"}]}
+{"id":"s5","task_type":"sft","messages":[{"role":"user","content":"法国的首都是哪里？"},{"role":"assistant","content":"巴黎。"}]}
+{"id":"s6","task_type":"sft","messages":[{"role":"user","content":"Say goodbye."},{"role":"assistant","content":"Goodbye!"}]}
+{"id":"s7","task_type":"sft","messages":[{"role":"user","content":"What gas do humans breathe?"},{"role":"assistant","content":"Oxygen."}]}
+

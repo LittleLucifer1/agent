@@ -8,15 +8,13 @@ the adapter's Launcher.
 
 from __future__ import annotations
 
-import os
-import shutil
 import time
 from pathlib import Path
 from typing import Optional
 
 from ..core.errors import TrainingFailedError
 from ..core.ir.recipe import Recipe
-from ..core.ir.sample import SampleStream
+from ..core.ir.sample import SampleStream, validated_sample_stream
 from ..core.registry import load_entry_points
 from ..core.router import resolve
 from .artifacts import OutputLayout, build_output_layout
@@ -29,60 +27,64 @@ def run_training(
     *,
     skip_preflight: bool = False,
     heartbeat_timeout_s: Optional[float] = None,
+    overwrite_output: bool = False,
 ) -> Path:
-    """Run one training job end-to-end and return the normalized output dir."""
+    """Run one training job end-to-end and return its managed run directory."""
     recipe.validate()
     load_entry_points()
     adapter = resolve(recipe)
 
-    layout = build_output_layout(recipe.io.output_dir)
+    with build_output_layout(
+        recipe.io.output_dir,
+        overwrite=overwrite_output,
+    ) as layout:
+        # Save the original IR recipe at the run root for traceability.
+        recipe.to_yaml(layout.recipe_yaml)
 
-    # Save the original IR recipe at the run root for traceability.
-    recipe.to_yaml(layout.recipe_yaml)
+        # 1) Validate lazily and translate IR into native data.
+        validated_stream = validated_sample_stream(stream, recipe.stage)
+        data_path = adapter.prepare_data(validated_stream, recipe, layout.workdir)
 
-    # 1) IR → native data
-    data_path = adapter.prepare_data(stream, recipe, layout.workdir)
+        # 2) Recipe → native config (adapter also drops recipe.yaml in workdir)
+        config_path = adapter.prepare_config(recipe, data_path, layout.workdir)
 
-    # 2) Recipe → native config (adapter also drops recipe.yaml in workdir)
-    config_path = adapter.prepare_config(recipe, data_path, layout.workdir)
+        # 3) Launcher
+        launcher = adapter.build_launcher(config_path, recipe, layout.workdir)
+        launcher.prepare_env()
 
-    # 3) Launcher
-    launcher = adapter.build_launcher(config_path, recipe, layout.workdir)
-    launcher.prepare_env()
+        if not skip_preflight:
+            run_preflight(adapter, recipe, data_path, layout.workdir)
 
-    if not skip_preflight:
-        run_preflight(adapter, recipe, data_path, layout.workdir)
+        # 4) Run + persist logs + parse metrics
+        parser = adapter.log_parser()
+        parser.stage = recipe.stage
+        t0 = time.monotonic()
+        with open(layout.metrics_jsonl, "w", encoding="utf-8") as fp_metrics:
+            for line in launcher.launch(heartbeat_timeout_s=heartbeat_timeout_s):
+                layout.append_raw_log(line)
+                metric = parser.parse_line(line)
+                if metric is not None:
+                    fp_metrics.write(metric.to_json() + "\n")
+                    fp_metrics.flush()
+        duration = time.monotonic() - t0
 
-    # 4) Run + tee logs + parse metrics
-    parser = adapter.log_parser()
-    parser.stage = recipe.stage
-    t0 = time.time()
-    with open(layout.metrics_jsonl, "w", encoding="utf-8") as fp_metrics:
-        for line in launcher.launch(heartbeat_timeout_s=heartbeat_timeout_s):
-            layout.append_raw_log(line)
-            m = parser.parse_line(line)
-            if m is not None:
-                fp_metrics.write(m.to_json() + "\n")
-                fp_metrics.flush()
-    duration = time.time() - t0
+        if launcher.returncode != 0:
+            raise TrainingFailedError(
+                returncode=launcher.returncode,
+                tail=layout.tail_raw_log(n=80),
+                message=(
+                    f"backend={adapter.name} stage={recipe.stage} "
+                    f"rc={launcher.returncode} duration={duration:.1f}s"
+                ),
+            )
 
-    if launcher.returncode != 0:
-        raise TrainingFailedError(
-            returncode=launcher.returncode,
-            tail=layout.tail_raw_log(n=80),
-            message=(
-                f"backend={adapter.name} stage={recipe.stage} "
-                f"rc={launcher.returncode} duration={duration:.1f}s"
-            ),
+        # 5) Normalize checkpoint into final/ + metadata.json
+        native_dir = launcher.collect_artifacts()
+        normalizer = adapter.checkpoint_normalizer()
+        normalized = normalizer.normalize(
+            native_dir=native_dir,
+            output_dir=layout.root,
+            recipe_yaml_path=layout.recipe_yaml,
         )
-
-    # 5) Normalize checkpoint into final/ + metadata.json
-    native_dir = launcher.collect_artifacts()
-    normalizer = adapter.checkpoint_normalizer()
-    normalized = normalizer.normalize(
-        native_dir=native_dir,
-        output_dir=layout.root,
-        recipe_yaml_path=layout.recipe_yaml,
-    )
-    layout.write_metadata(normalized)
-    return layout.root
+        layout.write_metadata(normalized)
+        return layout.root

@@ -1,4 +1,5 @@
 import pytest
+import distillwheel.core.registry as registry_module
 
 from distillwheel.core.adapter import BackendAdapter
 from distillwheel.core.envspec import EnvSpec
@@ -11,6 +12,18 @@ from distillwheel.core.registry import (
     unregister_adapter,
 )
 from distillwheel.core.router import resolve
+
+
+@pytest.fixture(autouse=True)
+def isolated_registry():
+    """Collection imports built-in backends; each registry test gets a clean copy."""
+    original = dict(registry_module._REGISTRY)
+    registry_module._REGISTRY.clear()
+    try:
+        yield
+    finally:
+        registry_module._REGISTRY.clear()
+        registry_module._REGISTRY.update(original)
 
 
 class _StubAdapter(BackendAdapter):
@@ -53,6 +66,17 @@ def test_route_via_backend_hint():
         backend_hint="_stub",
     )
     assert resolve(r).name == "_stub"
+
+
+def test_backend_hint_must_support_stage():
+    register_adapter(_StubAdapter)
+    r = Recipe(
+        stage="rloo", base_model="m",
+        train=TrainConfig(), optim=OptimConfig(), io=IOConfig(output_dir="o"),
+        backend_hint="_stub",
+    )
+    with pytest.raises(RoutingError, match="does not support"):
+        resolve(r)
 
 
 def test_route_no_match_raises():

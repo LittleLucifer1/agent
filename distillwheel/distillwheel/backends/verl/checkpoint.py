@@ -1,10 +1,4 @@
-"""verl checkpoint normalizer.
-
-verl saves FSDP-sharded model state under ``checkpoints/global_step_N/``.
-To get an HF-loadable artifact we invoke verl's own model_merger script
-(``python -m verl.scripts.model_merger`` or ``verl.utils.checkpoint``)
-**inside the verl venv** so we don't import verl from the main process.
-"""
+"""Normalize VERL 0.8 checkpoints into Hugging Face layout."""
 
 from __future__ import annotations
 
@@ -12,19 +6,29 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Iterable, Optional, Tuple
 
 from ...core.checkpoint import CheckpointNormalizer, NormalizedCheckpoint
 from ...core.envspec import EnvSpec
 from ...core.errors import CheckpointError
+
+_TOKENIZER_NAMES = (
+    "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
+    "added_tokens.json", "vocab.json", "vocab.txt", "merges.txt",
+    "tokenizer.model", "spiece.model", "chat_template.jinja",
+    "preprocessor_config.json", "processor_config.json",
+    "video_preprocessor_config.json",
+)
+_CONFIG_NAMES = (
+    "config.json", "generation_config.json", "adapter_config.json",
+    "model.safetensors.index.json", "pytorch_model.bin.index.json",
+)
 
 
 class VerlCheckpointNormalizer(CheckpointNormalizer):
     framework = "verl"
 
     def __init__(self, env_spec: Optional[EnvSpec] = None):
-        # Allow injection so tests can swap in a venv that doesn't really
-        # have verl installed.
         self._env_spec = env_spec
 
     def normalize(
@@ -33,144 +37,243 @@ class VerlCheckpointNormalizer(CheckpointNormalizer):
         output_dir: Path,
         recipe_yaml_path: Path,
     ) -> NormalizedCheckpoint:
-        native_dir = Path(native_dir)
-        if not native_dir.exists():
-            raise CheckpointError(f"verl native dir missing: {native_dir}")
+        native_dir = Path(native_dir).expanduser().resolve()
+        if not native_dir.is_dir():
+            raise CheckpointError(f"VERL native checkpoint directory is missing: {native_dir}")
 
         latest, step = self._latest_step(native_dir)
         if latest is None:
-            raise CheckpointError(f"no global_step_* directory in {native_dir}")
+            raise CheckpointError(f"no global_step_* VERL checkpoint found in {native_dir}")
+        actor_dir = latest / "actor"
+        if not actor_dir.is_dir():
+            raise CheckpointError(f"VERL actor checkpoint is missing: {actor_dir}")
 
-        final_dir = self._ensure_final_dir(output_dir)
+        final_dir = self._ensure_final_dir(Path(output_dir).expanduser().resolve())
+        premerged = self._find_premerged(actor_dir)
+        if premerged is not None:
+            self._copy_hf_outputs(premerged, final_dir)
+        else:
+            self._merge_with_verl_script(actor_dir, final_dir)
+            if not self._has_hf_weights(final_dir):
+                raise CheckpointError(
+                    f"VERL model merger completed but produced no HF weights in {final_dir}"
+                )
 
-        merged = self._merge_with_verl_script(latest, final_dir)
-        if not merged:
-            # Fall back to copying anything HF-ish that's already in place
-            # (e.g. when verl was run with auto-merge enabled).
-            self._copy_hf_outputs(latest, final_dir)
+        recipe_path = Path(recipe_yaml_path).expanduser().resolve()
+        recipe_base_model = self._base_model_from_recipe(recipe_path)
+        sources = [
+            final_dir,
+            actor_dir / "huggingface",
+            actor_dir,
+            latest / "huggingface",
+            latest,
+        ]
+        if recipe_base_model:
+            local_base = Path(recipe_base_model).expanduser()
+            if local_base.is_dir():
+                sources.append(local_base.resolve())
+        self._copy_auxiliary_configs(sources, final_dir)
+        self._copy_tokenizer(sources, final_dir)
+        self._copy_recipe(recipe_path, final_dir)
 
-        is_lora = (final_dir / "adapter_model.safetensors").exists()
-        self._copy_tokenizer(latest, final_dir)
-        self._copy_recipe(Path(recipe_yaml_path), final_dir)
-
-        # mirror intermediate global_step_* under output_dir/checkpoints
-        self._mirror_intermediate(native_dir, Path(output_dir) / "checkpoints")
-
-        ck = NormalizedCheckpoint(
+        self._mirror_intermediate(native_dir, Path(output_dir).expanduser().resolve() / "checkpoints")
+        base_model = recipe_base_model or self._read_base_model(sources) or ""
+        is_lora = any((final_dir / name).is_file() for name in (
+            "adapter_model.safetensors", "adapter_model.bin",
+        ))
+        if is_lora:
+            requirement = "LoRA-only checkpoint. Base model required for inference."
+            if base_model:
+                requirement += f"\nBase model: {base_model}"
+            (final_dir / "BASE_MODEL_REQUIRED.txt").write_text(
+                requirement + "\n",
+                encoding="utf-8",
+            )
+        checkpoint = NormalizedCheckpoint(
             final_dir=final_dir,
             is_lora=is_lora,
             step=step,
-            base_model=self._read_base_model(latest) or "",
+            base_model=base_model,
             framework=self.framework,
-            extra={"native_dir": str(native_dir)},
+            extra={"native_dir": str(native_dir), "actor_dir": str(actor_dir)},
         )
-        self._write_metadata(ck)
-        return ck
-
-    # ---------- internals ----------
+        self._write_metadata(checkpoint)
+        return checkpoint
 
     def _latest_step(self, native_dir: Path) -> Tuple[Optional[Path], Optional[int]]:
-        best = None
+        best: Optional[Path] = None
         best_step = -1
         for child in native_dir.iterdir():
             if not child.is_dir():
                 continue
-            name = child.name
-            if name.startswith("global_step_") or name.startswith("checkpoint-"):
-                try:
-                    step = int(name.split("_")[-1].split("-")[-1])
-                except ValueError:
-                    continue
-                if step > best_step:
-                    best_step = step
-                    best = child
-        if best is None:
-            return None, None
-        return best, best_step
-
-    def _merge_with_verl_script(self, src: Path, final_dir: Path) -> bool:
-        """Run ``verl.scripts.model_merger`` in the verl venv. Returns True on success."""
-        if self._env_spec is None or not self._env_spec.is_ready():
-            return False
-        py = str(self._env_spec.python_executable)
-        cmd = [
-            py, "-m", "verl.scripts.model_merger",
-            "--local_dir", str(src),
-            "--target_dir", str(final_dir),
-            "--hf_upload_target", "",
-        ]
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
-        except (OSError, subprocess.TimeoutExpired) as e:
-            raise CheckpointError(f"verl model_merger failed to launch: {e}") from e
-        if proc.returncode != 0:
-            raise CheckpointError(
-                f"verl model_merger rc={proc.returncode}:\n{proc.stderr[-2000:]}"
-            )
-        return True
-
-    def _copy_hf_outputs(self, src: Path, final_dir: Path) -> None:
-        """Backup path: copy any HF-format files that are already there."""
-        candidates = [
-            "config.json", "generation_config.json", "adapter_config.json",
-            "model.safetensors", "pytorch_model.bin",
-            "adapter_model.safetensors", "adapter_model.bin",
-        ]
-        copied_weights = False
-        for name in candidates:
-            f = src / name
-            if f.exists():
-                shutil.copy2(f, final_dir / name)
-                if name.startswith(("model.", "adapter_model.", "pytorch_model.")):
-                    copied_weights = True
-        for f in src.glob("model-*-of-*.safetensors"):
-            shutil.copy2(f, final_dir / f.name)
-            copied_weights = True
-        idx = src / "model.safetensors.index.json"
-        if idx.exists():
-            shutil.copy2(idx, final_dir / idx.name)
-        if not copied_weights:
-            raise CheckpointError(
-                f"could not produce HF weights for {src}: verl model_merger "
-                "not available and no pre-merged files in source."
-            )
-
-    def _copy_tokenizer(self, src: Path, final_dir: Path) -> None:
-        for name in ("tokenizer.json", "tokenizer_config.json",
-                     "special_tokens_map.json", "vocab.json", "merges.txt",
-                     "tokenizer.model"):
-            f = src / name
-            if f.exists():
-                shutil.copy2(f, final_dir / name)
-            else:
-                # verl often keeps the tokenizer in the model dir's parent
-                parent_f = src.parent / name
-                if parent_f.exists():
-                    shutil.copy2(parent_f, final_dir / name)
-
-    def _read_base_model(self, src: Path) -> Optional[str]:
-        for name in ("adapter_config.json", "config.json"):
-            f = src / name
-            if not f.exists():
+            match = None
+            if child.name.startswith("global_step_"):
+                match = child.name.removeprefix("global_step_")
+            elif child.name.startswith("checkpoint-"):
+                match = child.name.removeprefix("checkpoint-")
+            if match is None:
                 continue
             try:
-                with open(f, "r", encoding="utf-8") as fh:
-                    data = json.load(fh)
-            except (OSError, json.JSONDecodeError):
+                step = int(match)
+            except ValueError:
                 continue
-            for k in ("base_model_name_or_path", "_name_or_path", "model_name_or_path"):
-                if data.get(k):
-                    return data[k]
+            if step > best_step:
+                best, best_step = child, step
+        return (best, best_step) if best is not None else (None, None)
+
+    @staticmethod
+    def _has_hf_weights(directory: Path) -> bool:
+        if not directory.is_dir():
+            return False
+        exact = (
+            "model.safetensors", "pytorch_model.bin",
+            "adapter_model.safetensors", "adapter_model.bin",
+        )
+        if any((directory / name).is_file() for name in exact):
+            return True
+        patterns = (
+            "model-*-of-*.safetensors", "pytorch_model-*-of-*.bin",
+            "adapter_model-*-of-*.safetensors", "adapter_model-*-of-*.bin",
+        )
+        return any(any(directory.glob(pattern)) for pattern in patterns)
+
+    def _find_premerged(self, actor_dir: Path) -> Optional[Path]:
+        for candidate in (actor_dir / "huggingface", actor_dir):
+            if self._has_hf_weights(candidate):
+                return candidate
         return None
 
-    def _mirror_intermediate(self, native_dir: Path, dest: Path) -> None:
-        dest.mkdir(parents=True, exist_ok=True)
-        for child in native_dir.iterdir():
-            if child.is_dir() and (child.name.startswith("global_step_") or child.name.startswith("checkpoint-")):
-                target = dest / child.name
-                if target.exists():
+    def _merge_with_verl_script(self, actor_dir: Path, final_dir: Path) -> None:
+        if self._env_spec is None or not self._env_spec.is_ready():
+            expected = self._env_spec.python_executable if self._env_spec else "<unset>"
+            raise CheckpointError(
+                "VERL checkpoint is sharded and requires the VERL 0.8 model merger; "
+                f"backend Python is not ready at {expected}"
+            )
+        python = self._env_spec.python_executable.expanduser().resolve()
+        command = [
+            str(python), "-m", "verl.model_merger", "merge",
+            "--backend", "fsdp",
+            "--local_dir", str(actor_dir.resolve()),
+            "--target_dir", str(final_dir.resolve()),
+        ]
+        try:
+            process = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=1800,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = _process_text(exc.stdout)
+            stderr = _process_text(exc.stderr)
+            raise CheckpointError(
+                "VERL model merger timed out after 1800s\n"
+                f"stdout:\n{stdout[-4000:]}\nstderr:\n{stderr[-4000:]}"
+            ) from exc
+        except (OSError, ValueError) as exc:
+            raise CheckpointError(f"failed to launch VERL model merger: {exc}") from exc
+        if process.returncode != 0:
+            raise CheckpointError(
+                f"VERL model merger exited with code {process.returncode}\n"
+                f"stdout:\n{process.stdout[-4000:]}\n"
+                f"stderr:\n{process.stderr[-4000:]}"
+            )
+
+    def _copy_hf_outputs(self, source: Path, final_dir: Path) -> None:
+        if not self._has_hf_weights(source):
+            raise CheckpointError(f"no pre-merged HF weights found in {source}")
+        names = set(_CONFIG_NAMES) | set(_TOKENIZER_NAMES)
+        patterns = (
+            "model*.safetensors", "pytorch_model*.bin",
+            "adapter_model*.safetensors", "adapter_model*.bin",
+        )
+        files = {source / name for name in names if (source / name).is_file()}
+        for pattern in patterns:
+            files.update(path for path in source.glob(pattern) if path.is_file())
+        for file in sorted(files):
+            shutil.copy2(file, final_dir / file.name)
+
+    @staticmethod
+    def _copy_auxiliary_configs(sources: Iterable[Path], final_dir: Path) -> None:
+        for name in ("config.json", "generation_config.json", "adapter_config.json"):
+            destination = final_dir / name
+            if destination.is_file():
+                continue
+            for source in sources:
+                candidate = Path(source) / name
+                if candidate.is_file():
+                    shutil.copy2(candidate, destination)
+                    break
+
+    @staticmethod
+    def _copy_tokenizer(sources: Iterable[Path], final_dir: Path) -> None:
+        for name in _TOKENIZER_NAMES:
+            destination = final_dir / name
+            if destination.is_file():
+                continue
+            for source in sources:
+                candidate = Path(source) / name
+                if candidate.is_file():
+                    shutil.copy2(candidate, destination)
+                    break
+
+    @staticmethod
+    def _read_base_model(sources: Iterable[Path]) -> Optional[str]:
+        for source in sources:
+            for name in ("adapter_config.json", "config.json"):
+                file = Path(source) / name
+                if not file.is_file():
                     continue
                 try:
-                    shutil.copytree(child, target)
-                except (OSError, shutil.Error):
-                    pass
+                    data = json.loads(file.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                for key in ("base_model_name_or_path", "_name_or_path", "model_name_or_path"):
+                    value = data.get(key)
+                    if isinstance(value, str) and value:
+                        return value
+        return None
+
+    @staticmethod
+    def _base_model_from_recipe(recipe_path: Path) -> Optional[str]:
+        if not recipe_path.is_file():
+            return None
+        try:
+            import yaml
+
+            data = yaml.safe_load(recipe_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError, TypeError):
+            return None
+        if isinstance(data, dict) and isinstance(data.get("base_model"), str):
+            return data["base_model"]
+        return None
+
+    @staticmethod
+    def _mirror_intermediate(native_dir: Path, destination: Path) -> None:
+        destination.mkdir(parents=True, exist_ok=True)
+        for child in native_dir.iterdir():
+            if not child.is_dir() or not (
+                child.name.startswith("global_step_") or child.name.startswith("checkpoint-")
+            ):
+                continue
+            target = destination / child.name
+            if target.exists():
+                continue
+            try:
+                shutil.copytree(child, target)
+            except (OSError, shutil.Error):
+                # Mirroring is best-effort; the canonical final artifact above
+                # has already been validated.
+                pass
+
+
+def _process_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)

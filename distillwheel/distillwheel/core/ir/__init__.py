@@ -1,6 +1,6 @@
 """IR data classes — Sample / Message / Recipe / Metric."""
 
-from .sample import Message, Sample, SampleStream, TaskType
+from .sample import Message, Sample, SampleStream, TaskType, validated_sample_stream
 from .recipe import (
     IOConfig,
     OptimConfig,
@@ -18,6 +18,7 @@ __all__ = [
     "Sample",
     "SampleStream",
     "TaskType",
+    "validated_sample_stream",
     "IOConfig",
     "OptimConfig",
     "ParallelConfig",

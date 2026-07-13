@@ -1,21 +1,32 @@
-"""Launcher for ms-swift.
+"""Subprocess launcher for ms-swift 4.4.
 
-Runs ``<venv>/bin/swift {sft|rlhf} --config <yaml>`` (or the equivalent
-``python -m swift.cli ...`` if the CLI isn't on PATH).
+ms-swift's YAML parser consumes the config as the first positional argument,
+for example ``swift sft config.yaml``.  The console script delegates to the
+same ``swift.cli.main`` module used by the fallback below.
 """
 
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 from typing import List
 
-import yaml
-
 from ...core.envspec import EnvSpec
+from ...core.errors import IRValidationError
 from ...core.ir.recipe import Recipe
 from ...core.launcher import Launcher, filter_env
+from .recipe_mapper import swift_subcommand_for
+
+
+_INHERITED_DISTRIBUTED_KEYS = (
+    "NPROC_PER_NODE",
+    "NNODES",
+    "NODE_RANK",
+    "RANK",
+    "WORLD_SIZE",
+    "LOCAL_RANK",
+    "LOCAL_WORLD_SIZE",
+)
 
 
 class SwiftCLILauncher(Launcher):
@@ -27,42 +38,69 @@ class SwiftCLILauncher(Launcher):
         workdir: Path,
     ):
         self.env_spec = env_spec
-        self._config_path = Path(config_path)
+        self._config_path = Path(config_path).expanduser().resolve()
         self._recipe = recipe
-        self._workdir = Path(workdir)
+        self._workdir = Path(workdir).expanduser().resolve()
         self._native_out = self._workdir / "swift_native"
 
     def prepare_env(self) -> None:
         from ...core.errors import EnvironmentNotReadyError
 
-        if not self.env_spec.is_ready():
+        if not self.env_spec.run_health_check():
             raise EnvironmentNotReadyError(
-                f"swift venv not ready at {self.env_spec.venv_path}. "
-                "Run `python tools/setup_backend_envs.py swift` first."
+                f"swift 4.4 environment not ready at "
+                f"{self.env_spec.python_executable}. Run "
+                "`python tools/setup_backend_envs.py swift` first."
             )
         self._native_out.mkdir(parents=True, exist_ok=True)
 
     def command(self) -> List[str]:
-        with open(self._config_path, "r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-        subcmd = cfg.get("__subcommand__", "sft")
+        subcmd, _ = swift_subcommand_for(self._recipe.stage)
 
-        # Prefer the `swift` console-script in the venv; fall back to module.
+        # setup.py in ms-swift 4.4 registers swift=swift.cli.main:cli_main.
+        # If that console script is absent, invoking the same module via the
+        # environment's absolute Python path is equivalent and supported by
+        # its __main__ guard.
         bin_dir = self.env_spec.python_executable.parent
         swift_bin = bin_dir / ("swift.exe" if os.name == "nt" else "swift")
-        if swift_bin.exists():
-            argv = [str(swift_bin), subcmd, "--config", str(self._config_path)]
-        else:
-            argv = [
-                str(self.env_spec.python_executable),
-                "-m", "swift.cli.main", subcmd,
-                "--config", str(self._config_path),
-            ]
-        return argv
+        if swift_bin.is_file() and os.access(swift_bin, os.X_OK):
+            return [str(swift_bin.resolve()), subcmd, str(self._config_path)]
+        return [
+            str(self.env_spec.python_executable.resolve()),
+            "-m",
+            "swift.cli.main",
+            subcmd,
+            str(self._config_path),
+        ]
 
     def env(self) -> dict:
-        # Honor parallelism: leave NCCL/CUDA/HF vars to the user shell.
-        return filter_env()
+        dp = self._recipe.parallel.dp
+        if not isinstance(dp, int) or isinstance(dp, bool) or dp < 1:
+            raise ValueError("recipe.parallel.dp must be a positive integer")
+
+        nnodes_raw = os.environ.get("NNODES")
+        if nnodes_raw is not None:
+            try:
+                nnodes = int(nnodes_raw)
+            except ValueError as exc:
+                raise IRValidationError(
+                    "NNODES must be an integer; multi-node Swift runs require "
+                    "a future ResourceConfig extension"
+                ) from exc
+            if nnodes != 1:
+                raise IRValidationError(
+                    "the current Recipe IR defines only single-node "
+                    "parallel.dp; NNODES>1 requires a future ResourceConfig "
+                    "extension so global data parallelism is not multiplied"
+                )
+
+        # The recipe is authoritative.  Inheriting launcher state from a
+        # parent torchrun can multiply world size or reuse an invalid rank.
+        base_env = dict(os.environ)
+        for key in _INHERITED_DISTRIBUTED_KEYS:
+            base_env.pop(key, None)
+        extra = {"NPROC_PER_NODE": str(dp)} if dp > 1 else None
+        return filter_env(base_env=base_env, extra=extra)
 
     def collect_artifacts(self) -> Path:
         return self._native_out

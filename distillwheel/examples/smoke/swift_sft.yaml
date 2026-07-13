@@ -1,0 +1,38 @@
+stage: sft
+base_model: Qwen/Qwen2.5-0.5B-Instruct
+train:
+  epochs: 1
+  global_batch: 1
+  micro_batch: 1
+  grad_accum: 1
+  max_len: 256
+  seed: 42
+optim:
+  lr: 1.0e-4
+  scheduler: cosine
+  warmup_ratio: 0.0
+  weight_decay: 0.0
+io:
+  output_dir: outputs/smoke-swift-sft
+  save_steps: 1
+  logging_steps: 1
+  resume_from: null
+peft:
+  type: lora
+  r: 8
+  alpha: 16
+  target_modules:
+    - all-linear
+  dropout: 0.05
+precision: bf16
+parallel:
+  dp: 1
+  tp: 1
+  pp: 1
+  zero_stage: 0
+backend_hint: swift
+meta:
+  swift:
+    overrides:
+      max_steps: 1
+      save_total_limit: 1

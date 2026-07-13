@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ...core.adapter import BackendAdapter
-from ...core.envspec import EnvSpec
+from ...core.envspec import backend_env_spec
 from .checkpoint import SwiftCheckpointNormalizer
 from .data_writer import write_swift_jsonl
 from .launcher import SwiftCLILauncher
@@ -21,11 +21,21 @@ from .recipe_mapper import recipe_to_swift_args
 class SwiftAdapter(BackendAdapter):
     name = "swift"
     supported_stages = ("sft", "dpo", "kto")
-    env_spec = EnvSpec(
-        venv_path=Path(".venvs/swift"),
-        python_executable=Path(".venvs/swift/bin/python"),
-        required_packages=["ms-swift>=2.5", "transformers>=4.43", "peft>=0.11"],
-        health_check_cmd=None,
+    env_spec = backend_env_spec(
+        "swift",
+        required_packages=[
+            "ms-swift>=4.4,<4.5",
+            "transformers>=4.43",
+            "peft>=0.11,<0.20",
+        ],
+        health_check_cmd=[
+            "python",
+            "-c",
+            "import importlib.metadata as m; import swift, torch, trl; "
+            "v=m.version('ms-swift'); assert v.split('.')[:2] == ['4', '4'], v; "
+            "print(v, torch.__version__, trl.__version__)",
+        ],
+        cuda_constraint=">=11.8",
     )
 
     def prepare_data(self, stream, recipe, workdir):

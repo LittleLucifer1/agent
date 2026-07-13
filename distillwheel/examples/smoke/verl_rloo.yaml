@@ -1,0 +1,42 @@
+stage: rloo
+base_model: Qwen/Qwen2.5-0.5B-Instruct
+train:
+  epochs: 1
+  global_batch: 2
+  micro_batch: 1
+  grad_accum: 2
+  max_len: 256
+  seed: 42
+optim:
+  lr: 1.0e-6
+  scheduler: constant
+  warmup_ratio: 0.0
+  weight_decay: 0.0
+io:
+  output_dir: outputs/smoke-verl-rloo
+  save_steps: 1
+  logging_steps: 1
+  resume_from: null
+peft:
+  type: lora
+  r: 8
+  alpha: 16
+  target_modules: []
+  dropout: 0.0
+precision: bf16
+parallel:
+  dp: 1
+  tp: 1
+  pp: 1
+  zero_stage: 0
+rl:
+  kl_coef: 0.001
+  clip: 0.2
+  rollout_n: 2
+  rollout_engine: vllm
+  reward_fn_ref: examples/smoke/reward.py:compute_score
+backend_hint: verl
+meta:
+  verl:
+    max_response_length: 128
+    gpu_memory_utilization: 0.4

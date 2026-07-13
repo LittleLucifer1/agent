@@ -9,7 +9,7 @@ Resolution order:
 from __future__ import annotations
 
 from .adapter import BackendAdapter
-from .errors import RoutingError
+from .errors import RegistryError, RoutingError
 from .ir.recipe import Recipe
 from .registry import get_adapter, list_adapters
 
@@ -21,20 +21,33 @@ _DEFAULT_ROUTE = {
     "grpo": "verl",
     "ppo":  "verl",
     "rloo": "verl",
-    "opd":  "verl",
 }
 
 
 def resolve(recipe: Recipe) -> BackendAdapter:
     if recipe.backend_hint:
-        return get_adapter(recipe.backend_hint)
+        adapter = get_adapter(recipe.backend_hint)
+        if not adapter.supports(recipe):
+            raise RoutingError(
+                f"backend hint {recipe.backend_hint!r} does not support "
+                f"stage={recipe.stage!r}; supported={list(adapter.supported_stages)}"
+            )
+        return adapter
 
     if recipe.stage in _DEFAULT_ROUTE:
+        default_name = _DEFAULT_ROUTE[recipe.stage]
         try:
-            return get_adapter(_DEFAULT_ROUTE[recipe.stage])
-        except Exception:
-            # default route adapter not registered; fall through to discovery
+            adapter = get_adapter(default_name)
+        except RegistryError:
+            # The default backend is optional; fall through to plugin discovery.
             pass
+        else:
+            if not adapter.supports(recipe):
+                raise RoutingError(
+                    f"default backend {default_name!r} does not support "
+                    f"stage={recipe.stage!r}"
+                )
+            return adapter
 
     for name in list_adapters():
         ad = get_adapter(name)
