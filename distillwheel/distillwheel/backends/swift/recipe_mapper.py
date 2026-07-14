@@ -132,7 +132,6 @@ def recipe_to_swift_args(recipe: Recipe, data_path: Path, cfg_path: Path) -> Pat
         "save_strategy": "steps",
         "save_steps": recipe.io.save_steps,
         "logging_steps": recipe.io.logging_steps,
-<<<<<<< HEAD
         # DistillWheel currently supplies no validation stream.  Disabling the
         # automatic split also keeps tiny smoke datasets usable.
         "split_dataset_ratio": 0.0,
@@ -140,11 +139,6 @@ def recipe_to_swift_args(recipe: Recipe, data_path: Path, cfg_path: Path) -> Pat
         # checkpoint normalizer remains defensive about legacy version dirs.
         "add_version": False,
         "torch_dtype": _torch_dtype(recipe.precision),
-=======
-        "torch_dtype": {"bf16": "bfloat16", "fp16": "float16", "fp8": "float8"}.get(
-            recipe.precision, "bfloat16"
-        ),
->>>>>>> 67e62d2cdb9b79eef20cf4f3e7a520c5a169609a
     }
     cfg.update(_peft_block(recipe))
 
@@ -170,15 +164,11 @@ def recipe_to_swift_args(recipe: Recipe, data_path: Path, cfg_path: Path) -> Pat
     if zero_stage:
         cfg["deepspeed"] = f"zero{zero_stage}"
 
-<<<<<<< HEAD
     # This is deliberately last so advanced ms-swift 4.4 arguments can be
     # supplied without expanding the Recipe schema.  Owned paths/data above
     # cannot be replaced.
     cfg.update(_swift_overrides(recipe))
 
-=======
-    cfg_path = Path(cfg_path)
->>>>>>> 67e62d2cdb9b79eef20cf4f3e7a520c5a169609a
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     with open(cfg_path, "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
