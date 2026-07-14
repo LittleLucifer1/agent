@@ -120,12 +120,8 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
-<<<<<<< HEAD
 from collections.abc import Mapping
 from typing import Any, Literal, Optional
-=======
-from typing import Any, List, Literal, Optional
->>>>>>> 67e62d2cdb9b79eef20cf4f3e7a520c5a169609a
 
 from ..errors import IRValidationError
 
@@ -164,22 +160,12 @@ class OptimConfig:
 
 @dataclass
 class TrainConfig:
-<<<<<<< HEAD
     epochs: float = 1.0
     global_batch: int = 32
     micro_batch: int = 1
     grad_accum: int = 32
     max_len: int = 4096
     seed: int = 42
-=======
-    """训练超参。有效 batch size = micro_batch × grad_accum × dp。"""
-    epochs: float = 1.0                          # 训练轮数
-    global_batch: int = 32                       # 全局 batch size
-    micro_batch: int = 1                         # 单卡单步 batch size
-    grad_accum: int = 1                          # 梯度累积步数
-    max_len: int = 4096                          # 最大序列长度
-    seed: int = 42                               # 随机种子
->>>>>>> 67e62d2cdb9b79eef20cf4f3e7a520c5a169609a
 
 
 @dataclass
@@ -283,7 +269,6 @@ class Recipe:
         if self.peft is not None:
             if self.peft.type not in _PEFT_TYPES:
                 raise IRValidationError(
-<<<<<<< HEAD
                     f"unknown peft.type={self.peft.type!r}; expected one of {sorted(_PEFT_TYPES)}"
                 )
             _require_positive_int(self.peft.r, "peft.r")
@@ -325,13 +310,6 @@ class Recipe:
             # still treat None as "framework default" but emit a warning.
             # We treat missing as a soft validation issue, not fatal.
             pass
-=======
-                    f"recipe.rl is required for stage={self.stage}")
-        if self.train.global_batch < self.train.micro_batch:
-            raise IRValidationError("global_batch must be >= micro_batch")
-        if self.train.epochs <= 0:
-            raise IRValidationError("train.epochs must be > 0")
->>>>>>> 67e62d2cdb9b79eef20cf4f3e7a520c5a169609a
 
     # ---------- serialization ----------
 

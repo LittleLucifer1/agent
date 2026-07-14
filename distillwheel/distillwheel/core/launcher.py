@@ -1,40 +1,4 @@
-<<<<<<< HEAD
 """Launcher base class and subprocess-isolated default implementation."""
-=======
-"""Launcher base class + subprocess-isolated default implementation.
-
-All backends launch training as a **separate subprocess** that uses the
-backend's own venv python. This is the single most important invariant
-of the framework — it prevents version conflicts, crash contagion, and
-GPU-state pollution between the main process and the framework code.
-
-子进程隔离三件套
-================
-
-1. **独立 venv** — 每个 backend 用自己的 venv python, 不共享主进程依赖
-2. **环境变量白名单** — 主进程的 PYTHONPATH / LD_LIBRARY_PATH 不会泄漏到子进程,
-   只透传 CUDA / HF / WANDB / NCCL 等必要变量
-3. **心跳超时** — 后台 watchdog 线程监控 stdout, 长时间无输出则怀疑 NCCL hang 并杀进程
-
-执行流程
-=======
-    Orchestrator
-        ▼
-    launcher.prepare_env()          # 1) 检查 venv 就绪, 创建工作目录
-        │
-        ▼
-    launcher.launch()               # 2) subprocess.Popen 启动训练
-        │                                命令行 = launcher.command()
-        │                                环境变量 = launcher.env()  ← filter_env 白名单过滤
-        │
-        ├──▶ yield stdout line      # 3) 逐行 yield 给 orchestrator
-        │       │                        orchestrator 同时做:
-        │       ├─ 写入 raw_logs/        - 原始日志落盘
-        │       └─ LogParser.parse_line  - 抽取归一化指标
-        ▼
-    launcher.collect_artifacts()    # 4) 训练结束, 返回框架原生输出目录 交给 CheckpointNormalizer 处理
-"""
->>>>>>> 67e62d2cdb9b79eef20cf4f3e7a520c5a169609a
 
 from __future__ import annotations
 
@@ -52,7 +16,6 @@ from typing import Iterator, List, Optional
 from .envspec import EnvSpec
 from .errors import EnvironmentNotReadyError, HangDetectedError
 
-<<<<<<< HEAD
 # Environment-variable allow-list. Anything not in this set is dropped before
 # the subprocess is started, so the parent's PYTHONPATH cannot leak into the
 # backend environment.
@@ -146,29 +109,6 @@ _DEFAULT_ENV_WHITELIST = (
     "WINDIR",         # Windows
     "USERPROFILE",    # Windows
     "USERNAME",       # Windows
-=======
-# ── 环境变量白名单 ──────────────────────────────────────────────────
-# 只有这些变量会被透传给训练子进程, 其他全部丢弃。
-# 这样主进程的 PYTHONPATH / LD_LIBRARY_PATH 不会污染 backend 的 venv。
-_DEFAULT_ENV_WHITELIST = (
-    # 基础系统
-    "PATH", "HOME", "USER", "LANG", "LC_ALL",
-    "TMPDIR", "TEMP", "TMP",
-    # GPU / CUDA
-    "CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER", "NVIDIA_VISIBLE_DEVICES",
-    # HuggingFace
-    "HF_HOME", "HF_HUB_CACHE", "TRANSFORMERS_CACHE",
-    "HUGGINGFACE_HUB_TOKEN", "HF_TOKEN",
-    # Weights & Biases
-    "WANDB_API_KEY", "WANDB_PROJECT", "WANDB_ENTITY", "WANDB_MODE", "WANDB_DIR",
-    # 分布式训练 (NCCL / torch.distributed)
-    "NCCL_DEBUG", "NCCL_SOCKET_IFNAME",
-    "MASTER_ADDR", "MASTER_PORT", "RANK", "WORLD_SIZE", "LOCAL_RANK",
-    # Ray (verl backend)
-    "RAY_ADDRESS",
-    # Windows
-    "SYSTEMROOT", "WINDIR", "USERPROFILE", "USERNAME",
->>>>>>> 67e62d2cdb9b79eef20cf4f3e7a520c5a169609a
 )
 
 
@@ -186,24 +126,7 @@ def filter_env(
     whitelist: Optional[tuple] = None,
     extra: Optional[dict] = None,
 ) -> dict:
-<<<<<<< HEAD
     """Return a subset of environment variables safe for backend processes."""
-=======
-    """过滤环境变量, 只保留白名单中的键。
-
-    所有 Launcher 子类的 ``env()`` 方法都应通过此函数构建环境变量,
-    而不是直接传 ``os.environ`` — 否则 PYTHONPATH 等变量会污染 backend venv。
-
-    Parameters
-    ----------
-    base_env : dict, optional
-        源环境变量字典, 默认为 ``os.environ``
-    whitelist : tuple, optional
-        允许透传的变量名集合, 默认为 ``_DEFAULT_ENV_WHITELIST``
-    extra : dict, optional
-        额外注入的变量 (如 ``MOCK_NATIVE_DIR``), 无条件合入
-    """
->>>>>>> 67e62d2cdb9b79eef20cf4f3e7a520c5a169609a
     base = base_env if base_env is not None else os.environ
     allowed = whitelist if whitelist is not None else _DEFAULT_ENV_WHITELIST
     out = {str(k): str(v) for k, v in base.items() if k in allowed}
@@ -215,12 +138,6 @@ def filter_env(
 # ════════════════════════════════════════════════════════════════════
 # Launcher 基类
 # ════════════════════════════════════════════════════════════════════
-
-<<<<<<< HEAD
-    Every launched backend receives its own process group.  Closing the output
-    iterator early, a consumer exception, Ctrl-C, or a heartbeat timeout tears
-    down that group before waiting, so framework workers are not orphaned.
-=======
 class Launcher(ABC):
     """训练子进程的统一接口。
 
@@ -238,22 +155,16 @@ class Launcher(ABC):
     - ``collect_artifacts()`` — 训练结束后返回框架原生输出目录
 
     ``launch()`` 的默认实现一般不需要重写。
->>>>>>> 67e62d2cdb9b79eef20cf4f3e7a520c5a169609a
     """
 
     env_spec: EnvSpec
 
-<<<<<<< HEAD
     _returncode: int = -1
-=======
-    _returncode: int = -1                        # 由 launch() 设置
->>>>>>> 67e62d2cdb9b79eef20cf4f3e7a520c5a169609a
     _start_ts: float = 0.0
     _end_ts: float = 0.0
 
     @abstractmethod
     def prepare_env(self) -> None:
-<<<<<<< HEAD
         """Validate the backend environment and prepare its work directory."""
 
     @abstractmethod
@@ -263,36 +174,12 @@ class Launcher(ABC):
     @abstractmethod
     def env(self) -> dict:
         """Environment mapping to hand to the subprocess."""
-=======
-        """检查 backend venv 就绪性, 创建工作目录和环境变量。"""
-
-    @abstractmethod
-    def command(self) -> List[str]:
-        """返回完整命令行 (含 venv 内的解释器/CLI 路径)。
-
-        示例::
-
-            # swift
-            [".venvs/swift/bin/swift", "sft", "--config", "swift_config.yaml"]
-            # verl
-            [".venvs/verl/bin/python", "-m", "verl.trainer.main_ppo", "algorithm=grpo", ...]
-        """
-
-    @abstractmethod
-    def env(self) -> dict:
-        """返回传给子进程的环境变量字典。
-
-        实现时应调用 ``filter_env()`` 来强制白名单过滤,
-        而不是直接传 ``os.environ``。
-        """
->>>>>>> 67e62d2cdb9b79eef20cf4f3e7a520c5a169609a
 
     @abstractmethod
     def collect_artifacts(self) -> Path:
         """训练结束后返回框架原生输出目录, 供 CheckpointNormalizer 处理。"""
 
     def launch(self, *, heartbeat_timeout_s: Optional[float] = None) -> Iterator[str]:
-<<<<<<< HEAD
         """Spawn the subprocess and yield combined stdout/stderr lines."""
         if heartbeat_timeout_s is not None and heartbeat_timeout_s <= 0:
             raise ValueError("heartbeat_timeout_s must be > 0 when provided")
@@ -300,31 +187,6 @@ class Launcher(ABC):
         argv = [str(part) for part in self.command()]
         if not argv:
             raise EnvironmentNotReadyError("backend launcher produced an empty command")
-=======
-        """启动训练子进程, 逐行 yield stdout。
-
-        这是一个生成器 — orchestrator 在 for 循环中同时完成日志落盘和指标解析。
-
-        Parameters
-        ----------
-        heartbeat_timeout_s : float, optional
-            心跳超时 (秒)。如果子进程连续这么久没有新 stdout, watchdog 线程
-            会杀掉子进程并在迭代结束后抛出 :class:`HangDetectedError`。
-            典型场景: NCCL 多卡通信 hang 住, 进程卡死不输出。
-            默认为 None (不设超时), 因为长时间的 eval/checkpoint 是合法的。
-        """
-        self._start_ts = time.time()
-        proc = subprocess.Popen(
-            self.command(),
-            env=self.env(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,           # stderr 合并到 stdout, 统一处理
-            text=True,
-            bufsize=1,                           # 行缓冲, 保证实时输出
-            cwd=self._cwd(),
-        )
-        assert proc.stdout is not None
->>>>>>> 67e62d2cdb9b79eef20cf4f3e7a520c5a169609a
 
         child_env = dict(self.env())
         child_env.setdefault("PYTHONUNBUFFERED", "1")
@@ -431,7 +293,6 @@ class Launcher(ABC):
     @staticmethod
     def _terminate_process_tree(
         proc: "subprocess.Popen[str]",
-<<<<<<< HEAD
         lock: Optional[threading.Lock] = None,
         *,
         grace_s: float = 0.5,
@@ -520,46 +381,6 @@ class Launcher(ABC):
                 pass
 
     def _cwd(self) -> Optional[str]:
-=======
-        timeout_s: float,
-        hang_event: threading.Event,
-    ) -> Iterator[str]:
-        """带心跳监控的 launch 实现。
-
-        原理: 后台 watchdog 线程定期检查上次收到 stdout 的时间戳,
-        如果超过阈值且进程仍在运行, 则 kill 子进程并设置 hang_event。
-        """
-        state = {"last": time.time()}
-        stop = threading.Event()
-
-        def watchdog():
-            while not stop.is_set():
-                idle = time.time() - state["last"]
-                if idle > timeout_s and proc.poll() is None:
-                    hang_event.set()
-                    try:
-                        proc.kill()
-                    except OSError:
-                        pass
-                    return
-                time.sleep(min(5.0, timeout_s / 4))
-
-        t = threading.Thread(target=watchdog, daemon=True)
-        t.start()
-        try:
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                state["last"] = time.time()      # 每收到一行就刷新心跳时间戳
-                yield line.rstrip("\n")
-        finally:
-            stop.set()
-            proc.wait()
-            self._returncode = proc.returncode
-            self._end_ts = time.time()
-
-    def _cwd(self) -> Optional[str]:
-        """子进程的工作目录。子类可重写, 默认不指定 (继承主进程 cwd)。"""
->>>>>>> 67e62d2cdb9b79eef20cf4f3e7a520c5a169609a
         return None
 
     @property
@@ -575,25 +396,8 @@ class Launcher(ABC):
         return 0.0
 
 
-<<<<<<< HEAD
 class SubprocessLauncher(Launcher):
     """Generic subprocess launcher useful for tests and simple backends."""
-=======
-# ════════════════════════════════════════════════════════════════════
-# SubprocessLauncher — 通用实现, 主要用于测试和 mock backend
-# ════════════════════════════════════════════════════════════════════
-
-class SubprocessLauncher(Launcher):
-    """通用子进程 launcher — 接受显式的 argv 和 env。
-
-    真正的 backend (如 SwiftCLILauncher / VerlRayLauncher) 通常继承
-    Launcher 基类并自己组装命令行, 而不是用这个类。
-    这个类主要服务于:
-
-    - 单元测试 (用 ``echo`` / ``python -c`` 模拟训练)
-    - 简单的 wrapper backend
-    """
->>>>>>> 67e62d2cdb9b79eef20cf4f3e7a520c5a169609a
 
     def __init__(
         self,
