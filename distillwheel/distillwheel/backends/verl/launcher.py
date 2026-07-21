@@ -10,6 +10,7 @@ therefore need to be available on every worker node.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import List
 
@@ -18,6 +19,19 @@ from ...core.errors import EnvironmentNotReadyError
 from ...core.ir.recipe import Recipe
 from ...core.launcher import Launcher, filter_env
 from .recipe_mapper import load_overrides, verl_algorithm_for
+
+
+_INHERITED_DISTRIBUTED_KEYS = (
+    "NPROC_PER_NODE",
+    "NNODES",
+    "NODE_RANK",
+    "RANK",
+    "WORLD_SIZE",
+    "LOCAL_RANK",
+    "LOCAL_WORLD_SIZE",
+    "MASTER_ADDR",
+    "MASTER_PORT",
+)
 
 
 class VerlRayLauncher(Launcher):
@@ -35,9 +49,9 @@ class VerlRayLauncher(Launcher):
         self._native_out = self._workdir / "verl_native"
 
     def prepare_env(self) -> None:
-        if not self.env_spec.is_ready():
+        if not self.env_spec.run_health_check():
             raise EnvironmentNotReadyError(
-                f"VERL Python is not ready at {self.env_spec.python_executable}. "
+                f"VERL 0.8 environment is not ready at {self.env_spec.python_executable}. "
                 "Set DISTILLWHEEL_VERL_PYTHON to an absolute interpreter or "
                 "run `python tools/setup_backend_envs.py verl`."
             )
@@ -57,7 +71,13 @@ class VerlRayLauncher(Launcher):
         ]
 
     def env(self) -> dict:
-        return filter_env(extra={
+        # Ray assigns rank and rendezvous variables to its workers.  Values
+        # inherited from a parent torchrun/SLURM shell can otherwise leak into
+        # the VERL driver and make workers join an unrelated process group.
+        base_env = dict(os.environ)
+        for key in _INHERITED_DISTRIBUTED_KEYS:
+            base_env.pop(key, None)
+        return filter_env(base_env=base_env, extra={
             "PYTHONUNBUFFERED": "1",
             "VERL_OUTPUT_DIR": str(self._native_out),
         })

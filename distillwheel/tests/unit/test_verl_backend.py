@@ -15,7 +15,11 @@ from distillwheel.backends.verl.recipe_mapper import (
     verl_algorithm_for,
 )
 from distillwheel.core.envspec import EnvSpec
-from distillwheel.core.errors import CheckpointError, IRValidationError
+from distillwheel.core.errors import (
+    CheckpointError,
+    EnvironmentNotReadyError,
+    IRValidationError,
+)
 from distillwheel.core.ir.recipe import (
     IOConfig,
     OptimConfig,
@@ -85,6 +89,7 @@ def test_grpo_overrides_match_verl_08_schema(tmp_path):
     assert overrides["algorithm.adv_estimator"] == "grpo"
     assert overrides["actor_rollout_ref.model.path"] == "Qwen/Qwen2.5-0.5B-Instruct"
     assert overrides["actor_rollout_ref.rollout.name"] == "vllm"
+    assert overrides["actor_rollout_ref.rollout.mode"] == "async"
     assert overrides["actor_rollout_ref.rollout.n"] == "4"
     assert overrides["actor_rollout_ref.rollout.dtype"] == "bfloat16"
     assert overrides["actor_rollout_ref.actor.fsdp_config.dtype"] == "bfloat16"
@@ -206,6 +211,19 @@ def test_custom_chat_template_must_be_jinja(tmp_path):
     assert _decoded(overrides["actor_rollout_ref.model.custom_chat_template"]) == template
 
 
+def test_verl_08_rejects_removed_sync_rollout_mode(tmp_path):
+    recipe = _recipe(tmp_path)
+    recipe.meta = {"verl": {"rollout_mode": "sync"}}
+    with pytest.raises(IRValidationError, match="removed synchronous rollouts"):
+        _map(tmp_path, recipe)
+
+    recipe.meta = {
+        "verl": {"overrides": {"actor_rollout_ref.rollout.mode": "sync"}}
+    }
+    with pytest.raises(IRValidationError, match="managed by DistillWheel"):
+        _map(tmp_path, recipe)
+
+
 def test_dotted_reward_reference_generates_verl_file_shim(tmp_path):
     overrides = _map(tmp_path, _recipe(tmp_path))
     shim = Path(_decoded(overrides["reward.custom_reward_function.path"]))
@@ -317,7 +335,33 @@ def test_launcher_always_uses_absolute_backend_python_even_with_ray_address(tmp_
     assert launcher.env()["RAY_ADDRESS"] == "ray://cluster:10001"
 
 
-def test_checkpoint_merger_uses_verl_08_cli(tmp_path, monkeypatch):
+def test_launcher_checks_verl_health_and_scrubs_parent_distributed_state(tmp_path, monkeypatch):
+    python = tmp_path / ("python.exe" if __import__("os").name == "nt" else "python")
+    python.write_text("", encoding="utf-8")
+    python.chmod(0o755)
+    env_spec = EnvSpec(tmp_path / "env", python, required_packages=[])
+    overrides = tmp_path / "overrides.txt"
+    overrides.write_text("algorithm.adv_estimator=grpo\n", encoding="utf-8")
+    launcher = VerlRayLauncher(env_spec, overrides, _recipe(tmp_path), tmp_path)
+
+    monkeypatch.setattr(env_spec, "run_health_check", lambda: False)
+    with pytest.raises(EnvironmentNotReadyError, match="environment is not ready"):
+        launcher.prepare_env()
+
+    monkeypatch.setenv("RANK", "7")
+    monkeypatch.setenv("WORLD_SIZE", "8")
+    monkeypatch.setenv("MASTER_ADDR", "stale-host")
+    monkeypatch.setenv("MASTER_PORT", "23456")
+    monkeypatch.setenv("RAY_ADDRESS", "ray://cluster:10001")
+    child_env = launcher.env()
+    assert "RANK" not in child_env
+    assert "WORLD_SIZE" not in child_env
+    assert "MASTER_ADDR" not in child_env
+    assert "MASTER_PORT" not in child_env
+    assert child_env["RAY_ADDRESS"] == "ray://cluster:10001"
+
+
+def test_checkpoint_merger_uses_verl_08_cli_with_isolated_env(tmp_path, monkeypatch):
     python = tmp_path / ("python.exe" if __import__("os").name == "nt" else "python")
     python.write_text("", encoding="utf-8")
     python.chmod(0o755)
@@ -333,13 +377,22 @@ def test_checkpoint_merger_uses_verl_08_cli(tmp_path, monkeypatch):
         captured["kwargs"] = kwargs
         return SimpleNamespace(returncode=0, stdout="merged", stderr="")
 
+    monkeypatch.setenv("PYTHONPATH", "/wrong/parent/verl")
+    monkeypatch.setenv("RANK", "7")
+    monkeypatch.setenv("WORLD_SIZE", "8")
+    monkeypatch.setenv("MASTER_ADDR", "stale-host")
     monkeypatch.setattr("distillwheel.backends.verl.checkpoint.subprocess.run", fake_run)
     VerlCheckpointNormalizer(env_spec)._merge_with_verl_script(actor, final)
     assert captured["command"] == [
-        str(python.resolve()), "-m", "verl.model_merger", "merge",
+        str(python.resolve()), "-I", "-m", "verl.model_merger", "merge",
         "--backend", "fsdp", "--local_dir", str(actor.resolve()),
         "--target_dir", str(final.resolve()),
     ]
+    assert "PYTHONPATH" not in captured["kwargs"]["env"]
+    assert "RANK" not in captured["kwargs"]["env"]
+    assert "WORLD_SIZE" not in captured["kwargs"]["env"]
+    assert "MASTER_ADDR" not in captured["kwargs"]["env"]
+    assert captured["kwargs"]["env"]["PYTHONUNBUFFERED"] == "1"
 
 
 def test_checkpoint_merger_error_contains_stdout_and_stderr(tmp_path, monkeypatch):
@@ -347,7 +400,8 @@ def test_checkpoint_merger_error_contains_stdout_and_stderr(tmp_path, monkeypatc
     python.write_text("", encoding="utf-8")
     python.chmod(0o755)
     actor, final = tmp_path / "actor", tmp_path / "final"
-    actor.mkdir(); final.mkdir()
+    actor.mkdir()
+    final.mkdir()
     env_spec = EnvSpec(tmp_path / "env", python, required_packages=[])
     monkeypatch.setattr(
         "distillwheel.backends.verl.checkpoint.subprocess.run",
@@ -409,6 +463,48 @@ def test_lora_checkpoint_records_required_base_model(tmp_path):
     assert "Qwen/Qwen2.5-0.5B-Instruct" in requirement
 
 
+def test_lora_checkpoint_requires_adapter_config(tmp_path):
+    source = tmp_path / "native" / "global_step_1" / "actor" / "huggingface"
+    source.mkdir(parents=True)
+    (source / "adapter_model.safetensors").write_bytes(b"adapter")
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text("base_model: Qwen/Qwen2.5-0.5B-Instruct\n", encoding="utf-8")
+
+    with pytest.raises(CheckpointError, match="adapter_config.json"):
+        VerlCheckpointNormalizer().normalize(tmp_path / "native", tmp_path / "output", recipe)
+
+
+def test_sharded_checkpoint_requires_complete_index(tmp_path):
+    source = tmp_path / "native" / "global_step_2" / "actor" / "huggingface"
+    source.mkdir(parents=True)
+    (source / "model-00001-of-00002.safetensors").write_bytes(b"one")
+    (source / "config.json").write_text("{}", encoding="utf-8")
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text("base_model: test/model\n", encoding="utf-8")
+
+    with pytest.raises(CheckpointError, match="missing required index"):
+        VerlCheckpointNormalizer().normalize(tmp_path / "native", tmp_path / "output", recipe)
+
+    (source / "model.safetensors.index.json").write_text(
+        json.dumps({
+            "weight_map": {
+                "layer.0": "model-00001-of-00002.safetensors",
+                "layer.1": "model-00002-of-00002.safetensors",
+            }
+        }),
+        encoding="utf-8",
+    )
+    with pytest.raises(CheckpointError, match="missing weight file"):
+        VerlCheckpointNormalizer().normalize(tmp_path / "native", tmp_path / "output2", recipe)
+
+    (source / "model-00002-of-00002.safetensors").write_bytes(b"two")
+    checkpoint = VerlCheckpointNormalizer().normalize(
+        tmp_path / "native", tmp_path / "output3", recipe
+    )
+    assert checkpoint.is_lora is False
+    assert (checkpoint.final_dir / "model.safetensors.index.json").is_file()
+
+
 def test_official_verl_08_ray_console_sample_is_parsed():
     parser = VerlLogParser()
     parser.stage = "grpo"
@@ -426,3 +522,15 @@ def test_official_verl_08_ray_console_sample_is_parsed():
     assert metric.value_loss == 0.03
     assert metric.entropy == 0.2
     assert metric.learning_rate == 1e-6
+
+
+def test_log_parser_does_not_treat_timing_duration_as_training_step():
+    parser = VerlLogParser()
+    parser.stage = "grpo"
+    metric = parser.parse_line(
+        "timing_s/step:3328.003 - actor/pg_loss:-0.01 - "
+        "training/global_step:45 - critic/rewards/mean:0.5"
+    )
+    assert metric is not None
+    assert metric.step == 45
+    assert metric.loss == -0.01

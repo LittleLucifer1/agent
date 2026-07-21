@@ -8,7 +8,6 @@ failures remain the responsibility of backend integration tests or a real run.
 from __future__ import annotations
 
 import copy
-import tempfile
 from pathlib import Path
 
 from ..core.adapter import BackendAdapter

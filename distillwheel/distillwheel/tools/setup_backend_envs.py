@@ -58,7 +58,12 @@ def load_env_spec(env_yaml) -> dict:
 def _probe_python(command: Sequence[str], timeout: float = 10.0) -> str:
     try:
         result = subprocess.run(
-            [*command, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+            [
+                *command,
+                "-I",
+                "-c",
+                "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+            ],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -139,7 +144,10 @@ def _validate_existing_python(py: Path, required_version: str) -> None:
 
 
 def create_venv(creator: Sequence[str], venv_path: Path, *, dry_run: bool) -> None:
-    command = [*creator, "-m", "venv", str(venv_path)]
+    # The creator can be launched from an activated control environment.  Use
+    # isolated mode so its PYTHONPATH/user site cannot shadow the stdlib venv
+    # module or leak packages into the backend environment being created.
+    command = [*creator, "-I", "-m", "venv", str(venv_path)]
     print(f"  - creating venv: {venv_path}")
     print(f"  - creator: {' '.join(creator)}")
     if dry_run:
@@ -158,8 +166,8 @@ def pip_install(
     if not packages:
         return
     commands = (
-        [str(py), "-m", "pip", "install", "--upgrade", "pip"],
-        [str(py), "-m", "pip", "install", *extra_args, *packages],
+        [str(py), "-I", "-m", "pip", "install", "--upgrade", "pip"],
+        [str(py), "-I", "-m", "pip", "install", *extra_args, *packages],
     )
     print(f"  - installing: {' '.join(packages)}")
     if dry_run:

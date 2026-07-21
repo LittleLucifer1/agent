@@ -8,6 +8,7 @@ discovers and imports lazily.
 
 from __future__ import annotations
 
+import inspect
 from typing import Dict, List, Type
 
 from .adapter import BackendAdapter
@@ -18,15 +19,27 @@ _REGISTRY: Dict[str, Type[BackendAdapter]] = {}
 
 def register_adapter(cls: Type[BackendAdapter]) -> Type[BackendAdapter]:
     """Class decorator that registers ``cls`` under ``cls.name``."""
-    if not getattr(cls, "name", None):
+    if not isinstance(cls, type) or not issubclass(cls, BackendAdapter):
+        raise RegistryError("registered adapter must be a BackendAdapter subclass")
+    if inspect.isabstract(cls):
+        raise RegistryError(f"adapter {cls.__name__} is abstract and cannot be registered")
+    name = getattr(cls, "name", None)
+    if not isinstance(name, str) or not name.strip() or name != name.strip():
         raise RegistryError(f"adapter {cls.__name__} missing `name` attribute")
-    existing = _REGISTRY.get(cls.name)
+    stages = getattr(cls, "supported_stages", None)
+    if not isinstance(stages, tuple) or not all(
+        isinstance(stage, str) and bool(stage.strip()) for stage in stages
+    ):
+        raise RegistryError(
+            f"adapter {name!r} must declare supported_stages as a tuple of non-empty strings"
+        )
+    existing = _REGISTRY.get(name)
     if existing is not None and existing is not cls:
         raise RegistryError(
-            f"adapter {cls.name!r} already registered "
+            f"adapter {name!r} already registered "
             f"(existing={existing.__module__}.{existing.__name__})"
         )
-    _REGISTRY[cls.name] = cls
+    _REGISTRY[name] = cls
     return cls
 
 
@@ -35,7 +48,13 @@ def get_adapter(name: str) -> BackendAdapter:
         raise RegistryError(
             f"adapter {name!r} not registered. known={list(_REGISTRY)}"
         )
-    return _REGISTRY[name]()
+    adapter_cls = _REGISTRY[name]
+    try:
+        return adapter_cls()
+    except Exception as exc:
+        raise RegistryError(
+            f"adapter {name!r} could not be instantiated without arguments: {exc}"
+        ) from exc
 
 
 def list_adapters() -> List[str]:

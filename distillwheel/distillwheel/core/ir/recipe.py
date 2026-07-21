@@ -118,6 +118,7 @@ GRPO (强化学习)
 from __future__ import annotations
 
 import dataclasses
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Mapping
@@ -145,7 +146,7 @@ class PEFTConfig:
     type: PEFTType = "lora"                      # lora / qlora / full
     r: int = 16                                  # LoRA 秩
     alpha: int = 32                              # LoRA alpha (缩放 = alpha/r)
-    target_modules: List[str] = field(default_factory=list)  # 应用 LoRA 的模块名
+    target_modules: list[str] = field(default_factory=list)  # 应用 LoRA 的模块名
     dropout: float = 0.0                         # LoRA dropout
 
 
@@ -263,6 +264,8 @@ class Recipe:
             )
 
         _require_number(self.optim.lr, "optim.lr", minimum=0.0, exclusive=True)
+        if not isinstance(self.optim.scheduler, str) or not self.optim.scheduler.strip():
+            raise IRValidationError("optim.scheduler must be a non-empty string")
         _require_number(self.optim.warmup_ratio, "optim.warmup_ratio", minimum=0.0, maximum=1.0)
         _require_number(self.optim.weight_decay, "optim.weight_decay", minimum=0.0)
 
@@ -299,10 +302,16 @@ class Recipe:
 
         if self.target_template is not None and not isinstance(self.target_template, str):
             raise IRValidationError("target_template must be a string when set")
+        if isinstance(self.target_template, str) and not self.target_template.strip():
+            raise IRValidationError("target_template must be a non-empty string when set")
         if self.backend_hint is not None and (
             not isinstance(self.backend_hint, str) or not self.backend_hint.strip()
         ):
             raise IRValidationError("backend_hint must be a non-empty string when set")
+        if self.io.resume_from is not None and (
+            not isinstance(self.io.resume_from, str) or not self.io.resume_from.strip()
+        ):
+            raise IRValidationError("io.resume_from must be a non-empty string when set")
         if not isinstance(self.meta, dict):
             raise IRValidationError("recipe.meta must be a mapping")
         if not self.target_template:
@@ -324,7 +333,7 @@ class Recipe:
             raise IRValidationError("recipe must be a mapping")
         data = dict(d)
         version = data.pop("_recipe_schema_version", RECIPE_SCHEMA_VERSION)
-        if version != RECIPE_SCHEMA_VERSION:
+        if type(version) is not int or version != RECIPE_SCHEMA_VERSION:
             raise IRValidationError(
                 f"unsupported recipe schema version: got={version}, "
                 f"expected={RECIPE_SCHEMA_VERSION}. "
@@ -393,7 +402,7 @@ class Recipe:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 raw = yaml.safe_load(f)
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             raise IRValidationError(f"cannot read recipe yaml {path}: {exc}") from exc
         except yaml.YAMLError as exc:
             raise IRValidationError(f"invalid recipe yaml {path}: {exc}") from exc
@@ -418,6 +427,8 @@ def _require_number(
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         raise IRValidationError(f"{key} must be a number")
     numeric = float(value)
+    if not math.isfinite(numeric):
+        raise IRValidationError(f"{key} must be finite")
     if minimum is not None:
         invalid = numeric <= minimum if exclusive else numeric < minimum
         if invalid:

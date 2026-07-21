@@ -166,7 +166,11 @@ def test_end_to_end(mock_backend, tmp_path):
     assert metadata["framework"] == "mock"
     assert metadata["step"] == 3
 
-    metrics_lines = [json.loads(l) for l in (root / "metrics.jsonl").read_text(encoding="utf-8").splitlines() if l]
+    metrics_lines = [
+        json.loads(line)
+        for line in (root / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+        if line
+    ]
     assert len(metrics_lines) == 3
     assert metrics_lines[0]["step"] == 1
     assert metrics_lines[-1]["loss"] == pytest.approx(1 / 3, rel=1e-2)

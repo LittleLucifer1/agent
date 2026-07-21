@@ -44,7 +44,10 @@ metrics.jsonl 示例
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, asdict
+import math
+import os
+from collections.abc import Mapping
+from dataclasses import dataclass, field, fields
 from typing import Optional
 
 
@@ -78,7 +81,48 @@ class Metric:
     extra: dict = field(default_factory=dict)    # 框架特有的指标透传, 不在上面列表中的都放这里
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        # Metrics are observability data. A framework-specific value such as
+        # ``nan``, bytes, a set, or a Path must not crash an otherwise healthy
+        # training run or produce non-standard JSON. Keep the normalized file
+        # strictly JSON-compatible, using ``null`` for non-finite floats.
+        return {
+            item.name: _json_safe(getattr(self, item.name), seen=set())
+            for item in fields(self)
+        }
 
     def to_json(self) -> str:
-        return json.dumps(self.to_dict(), ensure_ascii=False)
+        return json.dumps(self.to_dict(), ensure_ascii=False, allow_nan=False)
+
+
+def _json_safe(value, *, seen: set[int]):
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, os.PathLike):
+        return os.fspath(value)
+
+    if isinstance(value, (Mapping, list, tuple, set, frozenset)):
+        identity = id(value)
+        if identity in seen:
+            return "<recursive>"
+        seen.add(identity)
+        try:
+            if isinstance(value, Mapping):
+                return {
+                    str(key): _json_safe(item, seen=seen)
+                    for key, item in value.items()
+                }
+            items = value
+            if isinstance(value, (set, frozenset)):
+                items = sorted(value, key=repr)
+            return [_json_safe(item, seen=seen) for item in items]
+        finally:
+            seen.remove(identity)
+
+    try:
+        return str(value)
+    except Exception:  # pragma: no cover - pathological third-party object
+        return f"<unserializable {type(value).__name__}>"

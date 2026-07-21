@@ -26,10 +26,15 @@ def _require(cond: bool, msg: str, sample_id: str) -> None:
 
 
 def _validate_message_list(value: Any, field_name: str, sample_id: str) -> None:
+    # Import lazily to keep ``sample`` -> ``validators`` free of a module-level
+    # cycle while still enforcing the public IR type (rather than accepting any
+    # object that merely happens to have ``role`` and ``content`` attributes).
+    from .sample import Message
+
     _require(isinstance(value, list) and bool(value),
              f"`{field_name}` must be a non-empty message list", sample_id)
     for index, message in enumerate(value):
-        _require(hasattr(message, "role") and hasattr(message, "content"),
+        _require(isinstance(message, Message),
                  f"`{field_name}[{index}]` must be a Message", sample_id)
         _require(message.role in _ROLES,
                  f"`{field_name}[{index}].role` is invalid: {message.role!r}", sample_id)
@@ -50,6 +55,24 @@ def _validate_message_list(value: Any, field_name: str, sample_id: str) -> None:
             f"`{field_name}[{index}].tool_call_id` must be a string",
             sample_id,
         )
+        if tool_calls is not None:
+            _require(
+                message.role == "assistant",
+                f"`{field_name}[{index}].tool_calls` is only valid for assistant messages",
+                sample_id,
+            )
+        if tool_call_id is not None:
+            _require(
+                message.role == "tool" and bool(tool_call_id.strip()),
+                f"`{field_name}[{index}].tool_call_id` requires a tool message and a non-empty id",
+                sample_id,
+            )
+        if message.role == "tool":
+            _require(
+                isinstance(tool_call_id, str) and bool(tool_call_id.strip()),
+                f"`{field_name}[{index}]` tool messages require `tool_call_id`",
+                sample_id,
+            )
 
 
 def _has_content(value: "MessageOrText") -> bool:
@@ -109,8 +132,11 @@ def validate_sample(s: "Sample") -> None:
         last = s.messages[-1]
         _require(last.role == "assistant",
                  "sft requires the last message to be from the assistant", s.id)
-        _require(bool(last.content.strip()),
-                 "sft requires a non-empty final assistant response", s.id)
+        _require(
+            bool(last.content.strip()) or bool(last.tool_calls),
+            "sft requires a non-empty final assistant response or tool call",
+            s.id,
+        )
     elif s.task_type == "preference":
         _require_message_or_text(s.prompt, "prompt", s.id, "preference")
         _require_message_or_text(s.chosen, "chosen", s.id, "preference")

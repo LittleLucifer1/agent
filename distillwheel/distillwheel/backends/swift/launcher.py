@@ -26,6 +26,8 @@ _INHERITED_DISTRIBUTED_KEYS = (
     "WORLD_SIZE",
     "LOCAL_RANK",
     "LOCAL_WORLD_SIZE",
+    "MASTER_ADDR",
+    "MASTER_PORT",
 )
 
 
@@ -95,7 +97,8 @@ class SwiftCLILauncher(Launcher):
                 )
 
         # The recipe is authoritative.  Inheriting launcher state from a
-        # parent torchrun can multiply world size or reuse an invalid rank.
+        # parent torchrun can multiply world size, reuse an invalid rank, or
+        # make a fresh single-node job join the parent's rendezvous endpoint.
         base_env = dict(os.environ)
         for key in _INHERITED_DISTRIBUTED_KEYS:
             base_env.pop(key, None)

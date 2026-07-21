@@ -111,6 +111,47 @@ def test_message_validates_tool_call_fields():
         sample.validate()
 
 
+def test_sft_allows_final_assistant_tool_call_without_text():
+    sample = Sample(
+        id="s-final-tool",
+        task_type="sft",
+        messages=[
+            Message("user", "weather?"),
+            Message(
+                "assistant",
+                "",
+                tool_calls=[{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "weather", "arguments": "{}"},
+                }],
+            ),
+        ],
+    )
+    sample.validate()
+
+
+def test_tool_call_fields_are_role_scoped():
+    user_call = Sample(
+        id="s-user-call",
+        task_type="sft",
+        messages=[
+            Message("user", "q", tool_calls=[{"id": "call-1"}]),
+            Message("assistant", "a"),
+        ],
+    )
+    with pytest.raises(IRValidationError, match="only valid for assistant"):
+        user_call.validate()
+
+    missing_id = Sample(
+        id="s-tool-no-id",
+        task_type="sft",
+        messages=[Message("tool", "result"), Message("assistant", "answer")],
+    )
+    with pytest.raises(IRValidationError, match="require `tool_call_id`"):
+        missing_id.validate()
+
+
 def test_kto_requires_label():
     s = Sample(id="k1", task_type="kto", prompt="q", completion="a")
     with pytest.raises(IRValidationError):
@@ -153,10 +194,32 @@ def test_sample_roundtrip():
     assert s2.meta == {"src": "test"}
 
 
+def test_sample_from_dict_rejects_unknown_fields():
+    raw = Sample(
+        id="strict", task_type="sft",
+        messages=[Message("user", "q"), Message("assistant", "a")],
+    ).to_dict()
+    raw["image"] = "typo.png"
+    with pytest.raises(IRValidationError, match="unknown sample field"):
+        Sample.from_dict(raw)
+
+
+def test_message_from_dict_rejects_unknown_fields():
+    with pytest.raises(IRValidationError, match="unknown message field"):
+        Message.from_dict({"role": "user", "content": "q", "contents": "typo"})
+
+
 def test_jsonl_error_has_path_and_line(tmp_path):
     path = tmp_path / "bad.jsonl"
     path.write_text("\n{not-json}\n", encoding="utf-8")
     with pytest.raises(IRValidationError, match=r"bad\.jsonl:2"):
+        list(iter_samples_from_jsonl(path))
+
+
+def test_jsonl_invalid_utf8_is_wrapped(tmp_path):
+    path = tmp_path / "bad-utf8.jsonl"
+    path.write_bytes(b"\xff\n")
+    with pytest.raises(IRValidationError, match="bad-utf8.jsonl"):
         list(iter_samples_from_jsonl(path))
 
 

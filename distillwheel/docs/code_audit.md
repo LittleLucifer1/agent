@@ -2,20 +2,22 @@
 
 ## 结论
 
-本轮以仓库代码为准、设计 PDF 为背景资料，审查并修复了核心编排层、ms-swift 适配器和 VERL 适配器。控制层测试在无 GPU 的本机完成，共 `133 passed`；wheel 构建和干净虚拟环境中的命令行入口也已验证。真实 CUDA、显存和后端 ABI 只能在目标 GPU 机器上通过一轮训练 step 验证，操作见[后端冒烟测试](backend_smoke_tests.md)。
+本轮以仓库代码为准、设计 PDF 为背景资料，审查并修复了核心编排层、ms-swift 适配器和 VERL 适配器。2026-07-14 对用户新增修改再次做了整体复审；控制层测试在无 GPU 的本机完成，共 `192 passed`，Ruff 静态检查通过，wheel 构建和命令行入口也已验证。真实 CUDA、显存和后端 ABI 只能在目标 GPU 机器上通过一轮训练 step 验证，操作见[后端冒烟测试](backend_smoke_tests.md)。
 
 ## 已修复的主要问题
 
 | 范围 | 原风险 | 当前处理 |
 |---|---|---|
-| 后端隔离 | 解释器路径依赖当前目录，环境变量可能污染子进程 | 支持绝对 Python 覆盖和统一环境根目录；清理分布式继承变量及 `PYTHONPATH`；保留必要 CUDA/HF 环境变量 |
+| 后端隔离 | 解释器路径依赖当前目录，父 `PYTHONPATH` 可能让健康检查误通过 | 支持绝对 Python 覆盖和统一环境根目录；健康检查、环境创建和 merger 使用 Python isolated mode；训练进程清理污染变量 |
 | 进程管理 | 超时或异常时可能只终止父进程并留下 worker | 创建独立进程组，超时、消费中止和关闭时终止整个进程树；日志解码容错并保留尾部 |
-| 输出安全 | 重用输出目录可能覆盖或误删用户文件 | 每次运行独占目录并写所有权标记/锁；默认拒绝非空目录；覆盖仅清理已知的框架管理产物 |
-| IR 校验 | batch 语义、stage/样本不匹配和消息字段可能拖到后端才失败 | 统一 `global = micro × grad_accum × dp`；校验阶段、数值、最后一条 assistant、KTO label、工具调用和 JSONL 行号 |
-| ms-swift 命令 | 旧版参数和 DPO 数据格式与 4.x 不一致 | 锁定 `>=4.4,<4.5`；使用位置 YAML、`swift rlhf`、标准 chosen/rejected 格式和 4.x LoRA/QLoRA 参数 |
-| ms-swift 分布式 | 单卡继承 `NPROC_PER_NODE`，多节点行为不确定 | 单卡不注入 launcher 变量；多卡由 `parallel.dp` 决定；当前多节点、TP、PP 在启动前明确拒绝 |
-| ms-swift 产物 | version 子目录、分片模型和 processor 资产可能漏归一化 | 递归发现 checkpoint，校验分片 index，并复制 adapter/model、tokenizer 和 processor 资产 |
-| VERL 配置 | Hydra 键、算法选择和 parquet schema 与目标版本不一致 | 锁定 `verl[vllm]==0.8.0`；映射 GRPO/PPO/RLOO 的 0.8 配置键和 FSDP dtype；输出嵌套 Arrow prompt schema |
+| 输出安全 | 重用输出目录可能覆盖、误删用户文件或混入旧权重 | 每次运行独占目录并验证所有权标记/锁；覆盖仅清理已知管理产物；checkpoint 归一化拒绝非空 `final/` |
+| IR 校验 | batch 语义、非有限数值、stage/样本不匹配和消息字段可能拖到后端才失败 | 统一 `global = micro × grad_accum × dp`；拒绝 `NaN/Inf`、未知字段和非法工具角色；统一包装 YAML/JSONL 编码错误 |
+| 指标可靠性 | 后端 extra 中的 `NaN`、bytes、set 或循环对象可能写出非法 JSON、甚至中断训练 | 指标递归转换为标准 JSON-safe 数据，非有限值写为 `null`；日志异常时确定性关闭 launcher |
+| ms-swift 命令 | 旧版参数、Agent 消息和 DPO 数据格式与 4.4 不一致 | 锁定 `>=4.4,<4.5`；使用位置 YAML、`swift rlhf`；将 OpenAI tool call 转成 `tool_call/tool_response` 并保留结构化 rejected continuation |
+| ms-swift 分布式 | 继承父 `torchrun` 的 rank 或 rendezvous 变量可能加入错误进程组 | 单卡不注入 launcher 变量；清理 rank/world/master 变量；多卡由 `parallel.dp` 决定；多节点、TP、PP 明确拒绝 |
+| ms-swift 产物 | 多个数字版本、分片模型和祖先目录资产可能选错或漏归一化 | 按数字版本选择最新有效 run，校验分片 index，并从 checkpoint/祖先复制 adapter、model、tokenizer 和 processor 资产 |
+| VERL 配置 | Hydra 键、rollout 模式和 parquet schema 与 0.8 不一致 | 锁定 `verl[vllm]==0.8.0`；使用 0.8 仅支持的 `rollout.mode=async`；映射 GRPO/PPO/RLOO、FSDP dtype 和嵌套 Arrow prompt schema |
+| VERL 日志 | `timing_s/step` 可能被误当成 global step | 只从明确的训练步数字段取 step，避免指标时间轴被耗时值污染 |
 | VERL 奖励函数 | 相对路径在 Ray worker 中不可解析 | 配置生成时解析为绝对 `file.py:function`，同时支持合法 dotted module |
 | VERL checkpoint | 使用过时 merger 或把 LoRA 当作完整模型 | 使用 0.8 `verl.model_merger`；LoRA 产物写入 base-model 依赖说明，不隐式下载资产 |
 | 能力边界 | OPD、多模态、QLoRA 等可能被静默错误映射 | 仅声明已实现的 SFT/DPO/KTO、GRPO/PPO/RLOO；无法忠实表达的组合在启动前给出明确错误 |

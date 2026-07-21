@@ -9,6 +9,7 @@ the adapter's Launcher.
 from __future__ import annotations
 
 import time
+from contextlib import closing
 from pathlib import Path
 from typing import Optional
 
@@ -17,7 +18,7 @@ from ..core.ir.recipe import Recipe
 from ..core.ir.sample import SampleStream, validated_sample_stream
 from ..core.registry import load_entry_points
 from ..core.router import resolve
-from .artifacts import OutputLayout, build_output_layout
+from .artifacts import build_output_layout
 from .preflight import run_preflight
 
 
@@ -60,12 +61,16 @@ def run_training(
         parser.stage = recipe.stage
         t0 = time.monotonic()
         with open(layout.metrics_jsonl, "w", encoding="utf-8") as fp_metrics:
-            for line in launcher.launch(heartbeat_timeout_s=heartbeat_timeout_s):
-                layout.append_raw_log(line)
-                metric = parser.parse_line(line)
-                if metric is not None:
-                    fp_metrics.write(metric.to_json() + "\n")
-                    fp_metrics.flush()
+            # Explicitly close the launch generator if logging/parsing raises.
+            # Its ``finally`` block is what terminates the entire subprocess
+            # tree, and relying on garbage collection is not deterministic.
+            with closing(launcher.launch(heartbeat_timeout_s=heartbeat_timeout_s)) as lines:
+                for line in lines:
+                    layout.append_raw_log(line)
+                    metric = parser.parse_line(line)
+                    if metric is not None:
+                        fp_metrics.write(metric.to_json() + "\n")
+                        fp_metrics.flush()
         duration = time.monotonic() - t0
 
         if launcher.returncode != 0:

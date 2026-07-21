@@ -95,3 +95,15 @@ def test_subprocess_output_uses_utf8_replacement(tmp_path):
     )
     launcher.prepare_env()
     assert list(launcher.launch()) == ["bad: �"]
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), float("-inf")])
+def test_heartbeat_timeout_must_be_finite_and_positive(tmp_path, timeout):
+    spec = EnvSpec(venv_path=Path(sys.prefix), python_executable=Path(sys.executable))
+    launcher = SubprocessLauncher(
+        env_spec=spec,
+        argv=[sys.executable, "-c", "print('never started')"],
+        artifacts_dir=tmp_path,
+    )
+    with pytest.raises(ValueError, match="finite number > 0"):
+        list(launcher.launch(heartbeat_timeout_s=timeout))

@@ -49,14 +49,37 @@ def _sft_sample(i):
 
 def test_swift_sft_row_preserves_tools_images_and_message_fields():
     sample = _sft_sample(1)
-    sample.messages[1].tool_calls = [{"id": "call-1", "type": "function"}]
+    sample.messages = [
+        Message(role="user", content="q"),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[{
+                "id": "call-1",
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "arguments": '{"query":"q"}',
+                },
+            }],
+        ),
+        Message(role="tool", content='{"result":"r"}', tool_call_id="call-1"),
+        Message(role="assistant", content="a"),
+    ]
     sample.tools = [{"type": "function", "function": {"name": "lookup"}}]
     sample.images = ["image.jpg"]
 
     row = sample_to_swift_row(sample, "sft")
 
-    assert row["messages"][0]["role"] == "user"
-    assert row["messages"][1]["tool_calls"][0]["id"] == "call-1"
+    assert [message["role"] for message in row["messages"]] == [
+        "user", "tool_call", "tool_response", "assistant"
+    ]
+    assert json.loads(row["messages"][1]["content"]) == {
+        "name": "lookup",
+        "arguments": {"query": "q"},
+    }
+    assert "tool_calls" not in row["messages"][1]
+    assert "tool_call_id" not in row["messages"][2]
     assert row["tools"] == sample.tools
     assert row["images"] == ["image.jpg"]
 
@@ -88,7 +111,15 @@ def test_swift_dpo_row_preserves_structured_chosen_messages():
         task_type="preference",
         prompt=[Message(role="system", content="be useful"), Message(role="user", content="q")],
         chosen=[
-            Message(role="assistant", content="calling", tool_calls=[{"id": "c1"}]),
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=[{
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                }],
+            ),
             Message(role="tool", content="result", tool_call_id="c1"),
             Message(role="assistant", content="good"),
         ],
@@ -98,10 +129,39 @@ def test_swift_dpo_row_preserves_structured_chosen_messages():
     row = sample_to_swift_row(sample, "dpo")
 
     assert [message["role"] for message in row["messages"]] == [
-        "system", "user", "assistant", "tool", "assistant"
+        "system", "user", "tool_call", "tool_response", "assistant"
     ]
-    assert row["messages"][2]["tool_calls"] == [{"id": "c1"}]
-    assert row["rejected_response"] == "bad"
+    assert json.loads(row["messages"][2]["content"])["name"] == "lookup"
+    assert row["rejected_response"] == [{"role": "assistant", "content": "bad"}]
+
+
+def test_swift_dpo_preserves_structured_rejected_tool_sequence():
+    sample = Sample(
+        id="d3",
+        task_type="preference",
+        prompt="q",
+        chosen="good",
+        rejected=[
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=[{
+                    "id": "c-rejected",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": '{"q":1}'},
+                }],
+            ),
+            Message(role="tool", content="wrong", tool_call_id="c-rejected"),
+            Message(role="assistant", content="bad"),
+        ],
+    )
+
+    row = sample_to_swift_row(sample, "dpo")
+
+    assert [message["role"] for message in row["rejected_response"]] == [
+        "tool_call", "tool_response", "assistant"
+    ]
+    assert json.loads(row["rejected_response"][0]["content"])["arguments"] == {"q": 1}
 
 
 def test_swift_kto_row_and_label_validation():
@@ -121,6 +181,14 @@ def test_swift_write_jsonl(tmp_path):
     rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
     assert len(rows) == 3
     assert rows[0]["id"] == "s0"
+
+
+def test_swift_writer_rejects_sample_task_type_stage_mismatch(tmp_path):
+    sample = Sample(
+        id="d1", task_type="preference", prompt="q", chosen="good", rejected="bad"
+    )
+    with pytest.raises(IRValidationError, match="incompatible"):
+        sample_to_swift_row(sample, "sft")
 
 
 def test_swift_recipe_mapper_emits_only_ms_swift_4_keys(tmp_path):
@@ -176,6 +244,24 @@ def test_swift_recipe_mapper_dpo_rlhf_and_fp16(tmp_path):
     assert parsed["tuner_type"] == "full"
     assert parsed["torch_dtype"] == "float16"
     assert "__subcommand__" not in parsed
+
+
+def test_swift_recipe_mapper_anchors_existing_relative_local_model(tmp_path, monkeypatch):
+    model_dir = tmp_path / "models" / "local-model"
+    model_dir.mkdir(parents=True)
+    data = tmp_path / "data.jsonl"
+    data.write_text("{}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    parsed = yaml.safe_load(
+        recipe_to_swift_args(
+            _recipe(tmp_path, base_model="models/local-model"),
+            data,
+            tmp_path / "swift.yaml",
+        ).read_text(encoding="utf-8")
+    )
+
+    assert parsed["model"] == str(model_dir.resolve())
 
 
 def test_swift_recipe_mapper_qlora_uses_bnb_lora(tmp_path):
@@ -241,6 +327,15 @@ def test_swift_recipe_mapper_resume_deepspeed_and_controlled_overrides(tmp_path)
     with pytest.raises(IRValidationError, match="DistillWheel-owned"):
         recipe_to_swift_args(recipe, data, tmp_path / "forbidden.yaml")
 
+    for owned_key, value in (
+        ("model", "other/model"),
+        ("rlhf_type", "kto"),
+        ("tuner_type", "full"),
+    ):
+        recipe.meta["swift"]["overrides"] = {owned_key: value}
+        with pytest.raises(IRValidationError, match="DistillWheel-owned"):
+            recipe_to_swift_args(recipe, data, tmp_path / f"forbidden-{owned_key}.yaml")
+
 
 def _launcher_spec(tmp_path: Path, *, with_console_script: bool) -> tuple[EnvSpec, Path | None]:
     bin_dir = tmp_path / "venv" / ("Scripts" if os.name == "nt" else "bin")
@@ -294,6 +389,7 @@ def test_swift_launcher_sets_multigpu_env_from_dp(tmp_path, monkeypatch):
     monkeypatch.setenv("NODE_RANK", "1")
     monkeypatch.setenv("WORLD_SIZE", "99")
     monkeypatch.setenv("MASTER_ADDR", "10.0.0.1")
+    monkeypatch.setenv("MASTER_PORT", "23456")
     launcher = SwiftCLILauncher(
         spec,
         config,
@@ -307,7 +403,8 @@ def test_swift_launcher_sets_multigpu_env_from_dp(tmp_path, monkeypatch):
     assert "NNODES" not in child_env
     assert "NODE_RANK" not in child_env
     assert "WORLD_SIZE" not in child_env
-    assert child_env["MASTER_ADDR"] == "10.0.0.1"
+    assert "MASTER_ADDR" not in child_env
+    assert "MASTER_PORT" not in child_env
 
 
 def test_swift_launcher_uses_plain_process_for_single_gpu(tmp_path, monkeypatch):
@@ -434,6 +531,53 @@ def test_swift_checkpoint_finds_latest_nested_version_checkpoint(tmp_path):
         encoding="utf-8"
     ) == "step-9"
     assert (tmp_path / "output" / "checkpoints" / "v1-new" / "checkpoint-9").is_dir()
+
+
+def test_swift_checkpoint_selects_latest_numeric_version_not_highest_old_step(tmp_path):
+    native = tmp_path / "native"
+    # An interrupted run can leave an empty direct checkpoint directory.  It
+    # must not hide otherwise valid versioned output.
+    (native / "checkpoint-999").mkdir(parents=True)
+    old = native / "v9-old" / "checkpoint-100"
+    new = native / "v10-new" / "checkpoint-2"
+    for checkpoint, content in ((old, "old"), (new, "new")):
+        checkpoint.mkdir(parents=True)
+        (checkpoint / "adapter_model.safetensors").write_text(content, encoding="utf-8")
+        (checkpoint / "adapter_config.json").write_text(
+            json.dumps({"base_model_name_or_path": "base/model"}), encoding="utf-8"
+        )
+
+    recipe_yaml = tmp_path / "recipe.yaml"
+    recipe_yaml.write_text("stage: sft\n", encoding="utf-8")
+    normalized = SwiftCheckpointNormalizer().normalize(
+        native, tmp_path / "output", recipe_yaml
+    )
+
+    assert normalized.step == 2
+    assert (normalized.final_dir / "adapter_model.safetensors").read_text(
+        encoding="utf-8"
+    ) == "new"
+
+
+def test_swift_checkpoint_reads_base_model_from_ancestor_adapter_config(tmp_path):
+    native = tmp_path / "native"
+    version_root = native / "v0-run"
+    checkpoint = version_root / "checkpoint-3"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "adapter_model.safetensors").write_text("adapter", encoding="utf-8")
+    (version_root / "adapter_config.json").write_text(
+        json.dumps({"base_model_name_or_path": "base/from-ancestor"}),
+        encoding="utf-8",
+    )
+
+    recipe_yaml = tmp_path / "recipe.yaml"
+    recipe_yaml.write_text("stage: sft\n", encoding="utf-8")
+    normalized = SwiftCheckpointNormalizer().normalize(
+        native, tmp_path / "output", recipe_yaml
+    )
+
+    assert normalized.base_model == "base/from-ancestor"
+    assert (normalized.final_dir / "adapter_config.json").is_file()
 
 
 def test_swift_logparser_handles_real_4x_progress_dict():

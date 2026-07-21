@@ -26,9 +26,35 @@ _SUBCOMMAND = {
 # them would make the normalized recipe disagree with the actual run.
 _PROTECTED_OVERRIDE_KEYS = {
     "__subcommand__",
+    "add_version",
     "dataset",
+    "deepspeed",
+    "gradient_accumulation_steps",
+    "learning_rate",
+    "logging_steps",
+    "lora_alpha",
+    "lora_dropout",
+    "lora_rank",
+    "lr_scheduler_type",
+    "max_length",
+    "model",
+    "num_train_epochs",
     "val_dataset",
     "output_dir",
+    "per_device_train_batch_size",
+    "quant_bits",
+    "quant_method",
+    "resume_from_checkpoint",
+    "rlhf_type",
+    "save_steps",
+    "save_strategy",
+    "seed",
+    "target_modules",
+    "template",
+    "torch_dtype",
+    "tuner_type",
+    "warmup_ratio",
+    "weight_decay",
 }
 
 
@@ -74,6 +100,14 @@ def _torch_dtype(precision: str) -> str:
     raise IRValidationError(f"unsupported swift precision: {precision!r}")
 
 
+def _model_reference(value: str) -> str:
+    """Keep hub IDs unchanged while anchoring existing local model paths."""
+    candidate = Path(value).expanduser()
+    if candidate.is_absolute() or candidate.exists():
+        return str(candidate.resolve())
+    return value
+
+
 def _swift_overrides(recipe: Recipe) -> Dict[str, Any]:
     swift_meta = (recipe.meta or {}).get("swift")
     if swift_meta is None:
@@ -117,7 +151,7 @@ def recipe_to_swift_args(recipe: Recipe, data_path: Path, cfg_path: Path) -> Pat
     native_output = (cfg_path.parent / "swift_native").resolve()
 
     cfg: Dict[str, Any] = {
-        "model": recipe.base_model,
+        "model": _model_reference(recipe.base_model),
         "dataset": [str(data_path)],
         "output_dir": str(native_output),
         "num_train_epochs": recipe.train.epochs,

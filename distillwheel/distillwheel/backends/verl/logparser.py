@@ -13,7 +13,13 @@ _KV = re.compile(
     rf"([A-Za-z_][A-Za-z0-9_./()@-]*)\s*[:=]\s*({_NUMBER})",
     re.IGNORECASE,
 )
-_STEP = re.compile(r"\b(?:step|global_step|iteration)\s*[:=]\s*(\d+)\b")
+# Match only canonical training-step keys.  A generic ``/step`` match also
+# captures metrics such as ``timing_s/step:3328.0`` and can silently assign a
+# wall-clock duration as the training step when it appears first in the line.
+_STEP = re.compile(
+    r"(?<![A-Za-z0-9_./])(?:training/global_step|global_step|iteration|step)"
+    r"\s*[:=]\s*(\d+)(?![\d.])"
+)
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 _RAY_PREFIX = re.compile(r"^(?:\([^\n)]*\bpid=\d+\)\s*)+")
 
@@ -38,7 +44,7 @@ class VerlLogParser(LogParser):
         if not values:
             return None
 
-        consumed = {"step", "global_step", "iteration"}
+        consumed = {"step", "global_step", "training/global_step", "iteration"}
 
         def pick(*keys: str, prefixes: Tuple[str, ...] = ()) -> Optional[float]:
             for key in keys:

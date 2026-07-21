@@ -85,6 +85,7 @@ Examples
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable, Iterator, List, Literal, Optional, Protocol, Union, runtime_checkable
@@ -113,6 +114,13 @@ class Message:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Message":
+        if not isinstance(d, Mapping):
+            raise IRValidationError("message must be a mapping")
+        unknown = sorted(set(d) - {"role", "content", "tool_calls", "tool_call_id"})
+        if unknown:
+            raise IRValidationError(f"unknown message field(s): {unknown}")
+        if "role" not in d:
+            raise IRValidationError("message.role is required")
         return cls(
             role=d["role"],
             content=d.get("content", ""),
@@ -181,26 +189,59 @@ class Sample:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Sample":
-        def _coerce_messages(v):
+        if not isinstance(d, Mapping):
+            raise IRValidationError("sample must be a mapping")
+        allowed = {
+            "id", "task_type", "messages", "prompt", "chosen", "rejected",
+            "completion", "label", "tools", "images", "meta",
+        }
+        unknown = sorted(set(d) - allowed)
+        if unknown:
+            raise IRValidationError(f"unknown sample field(s): {unknown}")
+        for required in ("id", "task_type"):
+            if required not in d:
+                raise IRValidationError(f"sample.{required} is required")
+
+        def _coerce_messages(v, field_name: str):
             if v is None or isinstance(v, str):
                 return v
             if isinstance(v, list):
-                return [Message.from_dict(m) if isinstance(m, dict) else m for m in v]
-            return v
+                converted = []
+                for index, item in enumerate(v):
+                    if isinstance(item, Message):
+                        converted.append(item)
+                    elif isinstance(item, Mapping):
+                        converted.append(Message.from_dict(item))
+                    else:
+                        raise IRValidationError(
+                            f"sample.{field_name}[{index}] must be a message mapping"
+                        )
+                return converted
+            raise IRValidationError(f"sample.{field_name} must be text or a message list")
 
-        return cls(
+        raw_messages = d.get("messages")
+        if raw_messages is None:
+            messages = None
+        elif isinstance(raw_messages, list):
+            messages = _coerce_messages(raw_messages, "messages")
+        else:
+            raise IRValidationError("sample.messages must be a message list")
+
+        sample = cls(
             id=d["id"],
             task_type=d["task_type"],
-            messages=[Message.from_dict(m) for m in d["messages"]] if d.get("messages") else None,
-            prompt=_coerce_messages(d.get("prompt")),
-            chosen=_coerce_messages(d.get("chosen")),
-            rejected=_coerce_messages(d.get("rejected")),
+            messages=messages,
+            prompt=_coerce_messages(d.get("prompt"), "prompt"),
+            chosen=_coerce_messages(d.get("chosen"), "chosen"),
+            rejected=_coerce_messages(d.get("rejected"), "rejected"),
             completion=d.get("completion"),
             label=d.get("label"),
             tools=d.get("tools"),
             images=d.get("images"),
             meta=d.get("meta", {}),
         )
+        sample.validate()
+        return sample
 
 
 @runtime_checkable
@@ -237,7 +278,7 @@ def iter_samples_from_jsonl(path: str | Path) -> Iterable[Sample]:
                         f"invalid sample at {source}:{line_number}: {exc}"
                     ) from exc
                 yield sample
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise IRValidationError(f"cannot read sample JSONL {source}: {exc}") from exc
 
 

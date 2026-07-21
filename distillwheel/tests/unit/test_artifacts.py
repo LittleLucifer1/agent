@@ -36,6 +36,23 @@ def test_overwrite_refuses_unmarked_directory(tmp_path):
         build_output_layout(root, overwrite=True)
 
 
+def test_overwrite_refuses_forged_or_corrupt_marker(tmp_path):
+    root = tmp_path / "not-owned"
+    root.mkdir()
+    marker = root / ".distillwheel-run.json"
+    marker.write_text("not json", encoding="utf-8")
+    with pytest.raises(OutputDirectoryError, match="invalid"):
+        build_output_layout(root, overwrite=True)
+    assert marker.read_text(encoding="utf-8") == "not json"
+
+
+def test_output_path_that_is_a_file_uses_domain_error(tmp_path):
+    output = tmp_path / "run"
+    output.write_text("not a directory", encoding="utf-8")
+    with pytest.raises(OutputDirectoryError, match="cannot create output directory"):
+        build_output_layout(output)
+
+
 def test_output_lock_prevents_concurrent_writer(tmp_path):
     root = tmp_path / "run"
     with build_output_layout(root):

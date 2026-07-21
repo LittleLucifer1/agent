@@ -40,10 +40,15 @@ metadata.json 示例
 from __future__ import annotations
 
 import json
+import os
+import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from .errors import CheckpointError
 
 
 @dataclass
@@ -56,7 +61,24 @@ class NormalizedCheckpoint:
     framework: str                               # 产出该 checkpoint 的 backend 名称
     extra: dict = field(default_factory=dict)    # 附加元数据 (native_dir, recipe hash, git commit ...)
 
+    def validate(self) -> None:
+        if not isinstance(self.final_dir, Path):
+            raise CheckpointError("checkpoint final_dir must be a Path")
+        if not isinstance(self.is_lora, bool):
+            raise CheckpointError("checkpoint is_lora must be a boolean")
+        if self.step is not None and (
+            not isinstance(self.step, int) or isinstance(self.step, bool) or self.step < 0
+        ):
+            raise CheckpointError("checkpoint step must be a non-negative integer or null")
+        if not isinstance(self.base_model, str):
+            raise CheckpointError("checkpoint base_model must be a string")
+        if not isinstance(self.framework, str) or not self.framework.strip():
+            raise CheckpointError("checkpoint framework must be a non-empty string")
+        if not isinstance(self.extra, dict):
+            raise CheckpointError("checkpoint extra must be a mapping")
+
     def to_dict(self) -> Dict[str, Any]:
+        self.validate()
         d = asdict(self)
         d["final_dir"] = str(self.final_dir)
         return d
@@ -64,20 +86,38 @@ class NormalizedCheckpoint:
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "NormalizedCheckpoint":
         """从 metadata.json 反序列化。"""
-        return cls(
-            final_dir=Path(d["final_dir"]),
+        if not isinstance(d, Mapping):
+            raise CheckpointError("checkpoint metadata must be a mapping")
+        for required in ("final_dir", "is_lora"):
+            if required not in d:
+                raise CheckpointError(f"checkpoint metadata missing {required!r}")
+        raw_final_dir = d["final_dir"]
+        if not isinstance(raw_final_dir, (str, os.PathLike)) or not str(raw_final_dir).strip():
+            raise CheckpointError("checkpoint final_dir must be a non-empty path")
+        extra = d.get("extra", {})
+        if not isinstance(extra, Mapping):
+            raise CheckpointError("checkpoint extra must be a mapping")
+        checkpoint = cls(
+            final_dir=Path(raw_final_dir),
             is_lora=d["is_lora"],
             step=d.get("step"),
             base_model=d.get("base_model", ""),
             framework=d.get("framework", "unknown"),
-            extra=d.get("extra", {}),
+            extra=dict(extra),
         )
+        checkpoint.validate()
+        return checkpoint
 
     @classmethod
     def from_json(cls, path: str | Path) -> "NormalizedCheckpoint":
         """从 metadata.json 文件加载。"""
-        with open(path, "r", encoding="utf-8") as f:
-            return cls.from_dict(json.load(f))
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return cls.from_dict(json.load(f))
+        except CheckpointError:
+            raise
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise CheckpointError(f"cannot read checkpoint metadata {path}: {exc}") from exc
 
 
 class CheckpointNormalizer(ABC):
@@ -121,7 +161,16 @@ class CheckpointNormalizer(ABC):
     def _ensure_final_dir(self, output_dir: Path) -> Path:
         """创建并返回 ``output_dir/final/`` 目录。"""
         final = Path(output_dir) / "final"
-        final.mkdir(parents=True, exist_ok=True)
+        try:
+            final.mkdir(parents=True, exist_ok=True)
+            if any(final.iterdir()):
+                raise CheckpointError(
+                    f"refusing to normalize into non-empty checkpoint directory: {final}"
+                )
+        except CheckpointError:
+            raise
+        except OSError as exc:
+            raise CheckpointError(f"cannot create normalized checkpoint directory {final}: {exc}") from exc
         return final
 
     def _copy_recipe(self, recipe_yaml_path: Path, final_dir: Path) -> None:
@@ -129,11 +178,29 @@ class CheckpointNormalizer(ABC):
         import shutil
 
         src = Path(recipe_yaml_path)
-        if src.exists():
+        if not src.is_file():
+            raise CheckpointError(f"training recipe does not exist or is not a file: {src}")
+        try:
             shutil.copy2(src, final_dir / "training_recipe.yaml")
+        except OSError as exc:
+            raise CheckpointError(f"cannot copy training recipe {src}: {exc}") from exc
 
     def _write_metadata(self, ck: NormalizedCheckpoint) -> None:
         """把 NormalizedCheckpoint 序列化为 ``final/metadata.json``。"""
         meta = ck.to_dict()
-        with open(ck.final_dir / "metadata.json", "w", encoding="utf-8") as f:
-            json.dump(meta, f, indent=2, ensure_ascii=False)
+        path = ck.final_dir / "metadata.json"
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2, ensure_ascii=False, allow_nan=False)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        except (OSError, TypeError, ValueError) as exc:
+            raise CheckpointError(f"cannot write checkpoint metadata {path}: {exc}") from exc
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass

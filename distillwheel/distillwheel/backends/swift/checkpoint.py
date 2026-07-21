@@ -49,6 +49,7 @@ _MODEL_INDEX_FILES = (
     "pytorch_model.bin.index.json",
 )
 _CHECKPOINT_RE = re.compile(r"^checkpoint-(\d+)$")
+_VERSION_DIR_RE = re.compile(r"^v(\d+)-(.+)$")
 
 
 class SwiftCheckpointNormalizer(CheckpointNormalizer):
@@ -67,9 +68,10 @@ class SwiftCheckpointNormalizer(CheckpointNormalizer):
         # add_version=false gives direct checkpoint-* directories.  Recursive
         # discovery keeps runs made with older defaults (vN-timestamp), and
         # last/best pointers, normalizable as well.
-        latest_dir, step = self._latest_checkpoint(native_dir)
+        effective_root = self._find_effective_root(native_dir)
+        latest_dir, step = self._latest_checkpoint(effective_root)
         if latest_dir is None:
-            latest_dir = self._fallback_weight_dir(native_dir)
+            latest_dir = self._fallback_weight_dir(effective_root)
         if latest_dir is None:
             raise CheckpointError(f"no model weights found under {native_dir}")
 
@@ -90,7 +92,9 @@ class SwiftCheckpointNormalizer(CheckpointNormalizer):
             final_dir=final_dir,
             is_lora=is_lora,
             step=step,
-            base_model=self._read_base_model(latest_dir) or "",
+            # adapter_config.json/config.json can live at an ancestor output
+            # root.  It has already been copied into final_dir above.
+            base_model=self._read_base_model(final_dir) or "",
             framework=self.framework,
             extra={"native_dir": str(native_dir)},
         )
@@ -105,23 +109,49 @@ class SwiftCheckpointNormalizer(CheckpointNormalizer):
         swift v4 nests output inside a versioned subdir like ``v0-20260630-160730/``.
         Pick the latest one; fall back to native_dir itself for older swift.
         """
-        versioned = []
+        # Current DistillWheel runs force add_version=false and therefore use
+        # native_dir directly.  Prefer that layout even if stale legacy
+        # version directories happen to coexist below the root.
+        if self._has_model_weights(native_dir) or any(
+            child.is_dir()
+            and _CHECKPOINT_RE.fullmatch(child.name)
+            and self._has_model_weights(child)
+            for child in native_dir.iterdir()
+        ):
+            return native_dir
+        if any(
+            (native_dir / marker).exists() or (native_dir / marker).is_symlink()
+            for marker in ("last", "best")
+        ):
+            return native_dir
+
+        versioned: list[tuple[int, str, Path]] = []
         for child in native_dir.iterdir():
-            if child.is_dir() and child.name.startswith("v") and "-" in child.name:
-                versioned.append(child)
+            match = _VERSION_DIR_RE.fullmatch(child.name)
+            if child.is_dir() and match:
+                versioned.append((int(match.group(1)), match.group(2), child))
         if versioned:
-            versioned.sort(key=lambda p: p.name)
-            return versioned[-1]
+            # Numeric ordering avoids selecting v9 after v10 merely because
+            # directory names were compared lexicographically.
+            return max(versioned, key=lambda item: (item[0], item[1]))[2]
         return native_dir
 
     def _latest_checkpoint(self, native_dir: Path) -> tuple[Optional[Path], Optional[int]]:
-        candidates: list[tuple[int, str, Path]] = []
-        for child in native_dir.rglob("checkpoint-*"):
-            if not child.is_dir():
-                continue
-            match = _CHECKPOINT_RE.fullmatch(child.name)
-            if match and self._has_model_weights(child):
-                candidates.append((int(match.group(1)), str(child), child))
+        def collect(paths) -> list[tuple[int, str, Path]]:
+            found: list[tuple[int, str, Path]] = []
+            for child in paths:
+                if not child.is_dir():
+                    continue
+                match = _CHECKPOINT_RE.fullmatch(child.name)
+                if match and self._has_model_weights(child):
+                    found.append((int(match.group(1)), str(child), child))
+            return found
+
+        # A direct add_version=false run is authoritative over any legacy
+        # versioned directories that may still be present underneath it.
+        candidates = collect(native_dir.glob("checkpoint-*"))
+        if not candidates:
+            candidates = collect(native_dir.rglob("checkpoint-*"))
         if candidates:
             step, _, path = max(candidates, key=lambda item: (item[0], item[1]))
             return path.resolve(), step

@@ -1,4 +1,3 @@
-import os
 import sys
 from pathlib import Path
 
@@ -37,7 +36,20 @@ def test_exact_python_override_wins(monkeypatch):
     assert spec.python_executable == executable
     assert spec.managed is False
     assert spec.resolved_health_check_cmd()[0] == str(executable)
+    assert spec.resolved_health_check_cmd()[1] == "-I"
     assert spec.run_health_check()
+
+
+def test_health_check_does_not_inherit_pythonpath(tmp_path, monkeypatch):
+    fake_module = tmp_path / "distillwheel_fake_backend_dependency.py"
+    fake_module.write_text("IMPORTED_FROM_PARENT = True\n", encoding="utf-8")
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    spec = EnvSpec(
+        venv_path=Path(sys.prefix),
+        python_executable=Path(sys.executable),
+        health_check_cmd=["python", "-c", "import distillwheel_fake_backend_dependency"],
+    )
+    assert not spec.run_health_check()
 
 
 def test_relative_python_override_is_rejected(monkeypatch):
@@ -60,3 +72,13 @@ def test_envspec_readiness_requires_file(tmp_path):
     directory.mkdir()
     spec = EnvSpec(venv_path=tmp_path, python_executable=directory)
     assert not spec.is_ready()
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf")])
+def test_health_check_rejects_invalid_timeout(timeout):
+    spec = EnvSpec(
+        venv_path=Path(sys.prefix),
+        python_executable=Path(sys.executable),
+        health_check_cmd=["python", "-c", "print('ok')"],
+    )
+    assert not spec.run_health_check(timeout=timeout)

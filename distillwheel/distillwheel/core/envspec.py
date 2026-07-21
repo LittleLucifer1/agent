@@ -9,6 +9,7 @@ environments (for example, Conda).
 from __future__ import annotations
 
 import os
+import math
 import re
 import subprocess
 import sys
@@ -59,18 +60,35 @@ class EnvSpec:
         if not self.health_check_cmd:
             return None
         py = str(self.python_executable)
-        return [py if part == "python" else str(part) for part in self.health_check_cmd]
+        command = [str(part) for part in self.health_check_cmd]
+        if command[0] == "python":
+            # Isolated mode ignores PYTHON* variables, the user site, and the
+            # current working directory.  A health check must only succeed
+            # because the backend environment itself contains its packages.
+            return [py, "-I", *command[1:]]
+        return command
 
     def run_health_check(self, timeout: float = 30.0) -> bool:
         """Run the configured health check with the environment's Python."""
+        if (
+            not isinstance(timeout, (int, float))
+            or isinstance(timeout, bool)
+            or not math.isfinite(float(timeout))
+            or timeout <= 0
+        ):
+            return False
         command = self.resolved_health_check_cmd()
         if not command:
             return self.is_ready()
         if not self.is_ready():
             return False
+        health_env = os.environ.copy()
+        health_env.pop("PYTHONPATH", None)
+        health_env.pop("PYTHONHOME", None)
         try:
             proc = subprocess.run(
                 command,
+                env=health_env,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",

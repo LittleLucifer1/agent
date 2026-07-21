@@ -29,6 +29,10 @@ _PROTECTED_CUSTOM_KEYS = {
     "trainer.default_local_dir",
     "reward.custom_reward_function.path",
     "reward.custom_reward_function.name",
+    # VERL 0.8 removed synchronous rollouts.  Keep this adapter-owned so a
+    # late custom override cannot turn a valid Recipe into a guaranteed
+    # runtime failure.
+    "actor_rollout_ref.rollout.mode",
 }
 
 
@@ -254,6 +258,12 @@ def recipe_to_verl_overrides(recipe: Recipe, data_path: Path, out_path: Path) ->
         meta.get("ref_log_prob_micro_batch_size_per_gpu", recipe.train.micro_batch),
         "recipe.meta.verl.ref_log_prob_micro_batch_size_per_gpu",
     )
+    rollout_mode = meta.get("rollout_mode", "async")
+    if rollout_mode != "async":
+        raise IRValidationError(
+            "VERL 0.8 removed synchronous rollouts; "
+            "recipe.meta.verl.rollout_mode must be 'async'"
+        )
 
     dtype = {"bf16": "bfloat16", "fp16": "float16"}[recipe.precision]
     native_dir = (out_path.parent / "verl_native").resolve()
@@ -276,7 +286,7 @@ def recipe_to_verl_overrides(recipe: Recipe, data_path: Path, out_path: Path) ->
     put("algorithm.adv_estimator", verl_algorithm_for(recipe.stage))
     put("actor_rollout_ref.model.path", recipe.base_model)
     put("actor_rollout_ref.rollout.name", recipe.rl.rollout_engine)
-    put("actor_rollout_ref.rollout.mode", meta.get("rollout_mode", "sync"))
+    put("actor_rollout_ref.rollout.mode", rollout_mode)
     put("actor_rollout_ref.rollout.n", recipe.rl.rollout_n)
     put("actor_rollout_ref.rollout.dtype", dtype)
     put("actor_rollout_ref.rollout.tensor_model_parallel_size", recipe.parallel.tp)

@@ -52,13 +52,20 @@ class OutputLayout:
 
     def __exit__(self, exc_type, exc, tb) -> None:
         try:
-            if exc is None:
-                self._write_run_marker("succeeded")
-            else:
-                self._write_run_marker(
-                    "failed",
-                    error=f"{exc_type.__name__}: {exc}"[:2000] if exc_type else str(exc)[:2000],
-                )
+            try:
+                if exc is None:
+                    self._write_run_marker("succeeded")
+                else:
+                    self._write_run_marker(
+                        "failed",
+                        error=f"{exc_type.__name__}: {exc}"[:2000] if exc_type else str(exc)[:2000],
+                    )
+            except Exception:
+                # Do not replace the actual training failure with a secondary
+                # disk/marker error. With no active exception the marker error
+                # still propagates, because a successful run must be durable.
+                if exc is None:
+                    raise
         finally:
             self.close()
 
@@ -139,6 +146,8 @@ def _acquire_lock(root: Path, run_id: str) -> tuple[Path, IO[str]]:
         except OSError:
             pass
         raise OutputDirectoryError(f"output directory is locked: {root}{details}") from exc
+    except OSError as exc:
+        raise OutputDirectoryError(f"cannot lock output directory {root}: {exc}") from exc
     lock_file = os.fdopen(fd, "w", encoding="utf-8")
     lock_file.write(
         json.dumps({
@@ -169,6 +178,33 @@ def _remove_managed_outputs(root: Path) -> None:
             candidate.unlink()
 
 
+def _validate_ownership_marker(marker_path: Path, root: Path) -> None:
+    """Require a genuine marker before deleting any managed output."""
+    if marker_path.is_symlink() or not marker_path.is_file():
+        raise OutputDirectoryError(
+            f"refusing to overwrite unmarked directory: {root}. "
+            f"Expected a regular {_MARKER_NAME!r} file."
+        )
+    try:
+        payload = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise OutputDirectoryError(
+            f"refusing to overwrite directory with an invalid {_MARKER_NAME!r}: {root}"
+        ) from exc
+    if (
+        not isinstance(payload, dict)
+        or type(payload.get("format_version")) is not int
+        or payload.get("format_version") != 1
+    ):
+        raise OutputDirectoryError(
+            f"refusing to overwrite directory with an invalid {_MARKER_NAME!r}: {root}"
+        )
+    if not isinstance(payload.get("run_id"), str) or not payload["run_id"].strip():
+        raise OutputDirectoryError(
+            f"refusing to overwrite directory with an invalid {_MARKER_NAME!r}: {root}"
+        )
+
+
 def build_output_layout(
     output_dir: str | os.PathLike[str],
     *,
@@ -182,7 +218,10 @@ def build_output_layout(
     the lock is always released and the run marker is finalized.
     """
     root = Path(output_dir).expanduser().resolve()
-    root.mkdir(parents=True, exist_ok=True)
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise OutputDirectoryError(f"cannot create output directory {root}: {exc}") from exc
     run_id = uuid.uuid4().hex
     lock_path, lock_file = _acquire_lock(root, run_id)
     marker_path = root / _MARKER_NAME
@@ -195,11 +234,7 @@ def build_output_layout(
                     f"output directory is not empty: {root}. "
                     "Choose a new directory or pass --overwrite-output."
                 )
-            if not marker_path.is_file():
-                raise OutputDirectoryError(
-                    f"refusing to overwrite unmarked directory: {root}. "
-                    f"Expected {_MARKER_NAME!r}."
-                )
+            _validate_ownership_marker(marker_path, root)
             _remove_managed_outputs(root)
 
         # Establish ownership before creating managed directories. If setup is
@@ -240,7 +275,7 @@ def build_output_layout(
         )
         layout._write_run_marker("running")
         return layout
-    except Exception:
+    except Exception as exc:
         try:
             lock_file.close()
         finally:
@@ -248,6 +283,8 @@ def build_output_layout(
                 lock_path.unlink(missing_ok=True)
             except OSError:
                 pass
+        if isinstance(exc, OSError):
+            raise OutputDirectoryError(f"cannot prepare output directory {root}: {exc}") from exc
         raise
 
 

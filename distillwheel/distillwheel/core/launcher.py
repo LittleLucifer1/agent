@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import math
 import shutil
 import signal
 import subprocess
@@ -181,8 +182,13 @@ class Launcher(ABC):
 
     def launch(self, *, heartbeat_timeout_s: Optional[float] = None) -> Iterator[str]:
         """Spawn the subprocess and yield combined stdout/stderr lines."""
-        if heartbeat_timeout_s is not None and heartbeat_timeout_s <= 0:
-            raise ValueError("heartbeat_timeout_s must be > 0 when provided")
+        if heartbeat_timeout_s is not None and (
+            not isinstance(heartbeat_timeout_s, (int, float))
+            or isinstance(heartbeat_timeout_s, bool)
+            or not math.isfinite(float(heartbeat_timeout_s))
+            or heartbeat_timeout_s <= 0
+        ):
+            raise ValueError("heartbeat_timeout_s must be a finite number > 0 when provided")
 
         argv = [str(part) for part in self.command()]
         if not argv:

@@ -57,6 +57,30 @@ def test_double_register_rejected():
         register_adapter(_StubAdapter2)
 
 
+def test_register_rejects_non_adapter_and_abstract_adapter():
+    with pytest.raises(RegistryError, match="BackendAdapter subclass"):
+        register_adapter(object)  # type: ignore[arg-type]
+
+    class _AbstractAdapter(BackendAdapter):
+        name = "_abstract"
+        supported_stages = ("sft",)
+
+    with pytest.raises(RegistryError, match="abstract"):
+        register_adapter(_AbstractAdapter)
+
+
+def test_get_adapter_wraps_constructor_contract_errors():
+    class _NeedsArgumentAdapter(_StubAdapter):
+        name = "_needs_argument"
+
+        def __init__(self, required):
+            self.required = required
+
+    register_adapter(_NeedsArgumentAdapter)
+    with pytest.raises(RegistryError, match="instantiated without arguments"):
+        get_adapter("_needs_argument")
+
+
 def test_route_via_backend_hint():
     unregister_adapter("_stub")
     register_adapter(_StubAdapter)
