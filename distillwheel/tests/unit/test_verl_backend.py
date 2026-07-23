@@ -75,12 +75,75 @@ def _map(tmp_path: Path, recipe: Recipe) -> dict:
 
 
 def test_verl_supports_only_public_08_algorithms():
-    assert VerlAdapter.supported_stages == ("grpo", "ppo", "rloo")
+    assert VerlAdapter.supported_stages == ("grpo", "ppo", "rloo", "opd")
     assert verl_algorithm_for("grpo") == "grpo"
     assert verl_algorithm_for("ppo") == "gae"
     assert verl_algorithm_for("rloo") == "rloo"
+    assert verl_algorithm_for("opd") == "grpo"
     with pytest.raises(IRValidationError, match="supports only"):
-        verl_algorithm_for("opd")
+        verl_algorithm_for("sft")
+
+
+def test_verl_algorithm_for_supports_only_public_08_message():
+    with pytest.raises(IRValidationError, match="supports only"):
+        verl_algorithm_for("kto")
+
+
+def test_opd_overrides_enable_distillation(tmp_path):
+    recipe = _recipe(tmp_path, "opd")
+    recipe.rl = replace(recipe.rl, kl_coef=0.0, rollout_n=1)
+    overrides = _map(tmp_path, recipe)
+
+    assert overrides["algorithm.adv_estimator"] == "grpo"
+    assert overrides["distillation.enabled"] == "true"
+    assert overrides["distillation.n_gpus_per_node"] == "1"
+    assert overrides["distillation.nnodes"] == "1"
+    # The teacher defaults to the student's base model (loss ≈ 0 debug setup).
+    assert (
+        overrides["distillation.teacher_models.teacher_model.model_path"]
+        == recipe.base_model
+    )
+    assert overrides["distillation.teacher_models.teacher_model.inference.name"] == "vllm"
+    assert overrides["distillation.distillation_loss.loss_mode"] == "k3"
+    assert overrides["distillation.distillation_loss.use_policy_gradient"] == "false"
+    assert overrides["distillation.distillation_loss.use_task_rewards"] == "false"
+    # kl_coef=0 keeps both KL paths off, per VERL's OPD recommendation.
+    assert overrides["actor_rollout_ref.actor.use_kl_loss"] == "false"
+    assert overrides["algorithm.use_kl_in_reward"] == "false"
+    assert overrides["critic.enable"] == "false"
+
+
+def test_opd_teacher_model_override(tmp_path):
+    recipe = _recipe(tmp_path, "opd")
+    recipe.rl = replace(recipe.rl, kl_coef=0.0)
+    recipe.meta = {
+        "verl": {
+            "teacher_model": "Qwen/Qwen2.5-7B-Instruct",
+            "distillation_use_task_rewards": True,
+            "distillation_loss_coef": 1.5,
+        }
+    }
+    overrides = _map(tmp_path, recipe)
+    assert (
+        overrides["distillation.teacher_models.teacher_model.model_path"]
+        == "Qwen/Qwen2.5-7B-Instruct"
+    )
+    assert overrides["distillation.distillation_loss.use_task_rewards"] == "true"
+    assert overrides["distillation.distillation_loss.distillation_loss_coef"] == "1.5"
+
+
+def test_opd_rejects_k1_without_policy_gradient(tmp_path):
+    recipe = _recipe(tmp_path, "opd")
+    recipe.meta = {"verl": {"distillation_loss_mode": "k1"}}
+    data = tmp_path / "prompts.parquet"
+    data.write_bytes(b"parquet-placeholder")
+    with pytest.raises(IRValidationError, match="use_policy_gradient"):
+        recipe_to_verl_overrides(recipe, data, tmp_path / "verl_overrides.txt")
+
+
+def test_non_opd_stage_emits_no_distillation_keys(tmp_path):
+    overrides = _map(tmp_path, _recipe(tmp_path))
+    assert not any(key.startswith("distillation.") for key in overrides)
 
 
 def test_grpo_overrides_match_verl_08_schema(tmp_path):

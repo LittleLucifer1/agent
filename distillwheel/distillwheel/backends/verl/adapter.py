@@ -20,15 +20,17 @@ from .recipe_mapper import recipe_to_verl_overrides
 
 class VerlAdapter(BackendAdapter):
     name = "verl"
-    supported_stages = ("grpo", "ppo", "rloo")
+    supported_stages = ("grpo", "ppo", "rloo", "opd")
     env_spec = backend_env_spec(
         "verl",
         required_packages=["verl==0.8.0", "ray>=2.41", "vllm>=0.8.5", "pyarrow>=19"],
         cuda_constraint=">=12.8",
         health_check_cmd=[
             "python", "-c",
+            # Prefix match keeps dev/source builds of the 0.8 line (for
+            # example 0.8.0.dev0 from `pip install -e`) acceptable.
             "import importlib.metadata as m; import ray, vllm, pyarrow; "
-            "v=m.version('verl'); assert v=='0.8.0', v; print(v)",
+            "v=m.version('verl'); assert v.split('.')[:2]==['0', '8'], v; print(v)",
         ],
     )
 

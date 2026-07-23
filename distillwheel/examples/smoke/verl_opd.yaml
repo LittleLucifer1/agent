@@ -1,0 +1,61 @@
+stage: opd
+base_model: Qwen/Qwen2.5-0.5B-Instruct
+train:
+  epochs: 1
+  # Generation batch = global_batch * rollout_n = 8, which divides evenly
+  # across VERL's default of 8 agent loop workers.
+  global_batch: 8
+  micro_batch: 1
+  grad_accum: 8
+  max_len: 256
+  seed: 42
+optim:
+  lr: 1.0e-6
+  scheduler: constant
+  warmup_ratio: 0.0
+  weight_decay: 0.0
+io:
+  output_dir: outputs/smoke-verl-opd
+  save_steps: 1
+  logging_steps: 1
+  resume_from: null
+peft:
+  type: lora
+  r: 8
+  alpha: 16
+  target_modules: []
+  dropout: 0.0
+precision: bf16
+parallel:
+  dp: 1
+  tp: 1
+  pp: 1
+  zero_stage: 0
+rl:
+  # OPD: the teacher supplies the per-token KL signal, so the standard
+  # reference-policy KL is disabled (VERL's documented recommendation).
+  kl_coef: 0.0
+  clip: 0.2
+  # One student rollout per prompt; the teacher scores every sampled token.
+  rollout_n: 1
+  rollout_engine: vllm
+  reward_fn_ref: examples/smoke/reward.py:compute_score
+backend_hint: verl
+meta:
+  verl:
+    max_response_length: 128
+    gpu_memory_utilization: 0.4
+    # teacher_model defaults to base_model: with teacher == student the
+    # distillation loss is approximately zero, which validates the pipeline
+    # (VERL's documented debugging setup). Point it at a larger same-family
+    # model (e.g. Qwen/Qwen2.5-7B-Instruct) for a real distillation run.
+    # The teacher occupies a dedicated resource pool:
+    teacher_n_gpus_per_node: 1
+    teacher_nnodes: 1
+    teacher_tensor_model_parallel_size: 1
+    teacher_gpu_memory_utilization: 0.3
+    # k3 single-sample reverse-KL estimator with direct backprop (GKD-style
+    # defaults); distillation loss only, no task-reward term.
+    distillation_loss_mode: k3
+    distillation_use_policy_gradient: false
+    distillation_use_task_rewards: false

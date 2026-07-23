@@ -16,6 +16,7 @@ _STAGE_TASK_TYPE = {
     "grpo": "rl_prompt",
     "ppo": "rl_prompt",
     "rloo": "rl_prompt",
+    "opd": "rl_prompt",
 }
 _ROLES = {"system", "user", "assistant", "tool"}
 

@@ -32,7 +32,7 @@ parallel:
 rl:
   kl_coef: 0.001
   clip: 0.2
-  rollout_n: 2
+  rollout_n: 4
   rollout_engine: vllm
   reward_fn_ref: examples/smoke/reward.py:compute_score
 backend_hint: verl
@@ -40,4 +40,3 @@ meta:
   verl:
     max_response_length: 128
     gpu_memory_utilization: 0.4
-

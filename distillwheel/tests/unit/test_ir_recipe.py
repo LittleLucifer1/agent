@@ -99,7 +99,7 @@ def test_recipe_from_dict_does_not_mutate_input(tmp_path):
 
 def test_recipe_rejects_unknown_stage():
     recipe = Recipe(
-        stage="opd",  # type: ignore[arg-type]
+        stage="dapo",  # type: ignore[arg-type]
         base_model="m",
         train=TrainConfig(),
         optim=OptimConfig(),

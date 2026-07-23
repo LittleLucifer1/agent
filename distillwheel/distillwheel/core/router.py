@@ -21,6 +21,7 @@ _DEFAULT_ROUTE = {
     "grpo": "verl",
     "ppo":  "verl",
     "rloo": "verl",
+    "opd":  "verl",
 }
 
 

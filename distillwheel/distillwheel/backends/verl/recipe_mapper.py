@@ -13,13 +13,16 @@ from ...core.ir.recipe import Recipe
 
 # VERL selects all three algorithms through ``main_ppo``.  The distinguishing
 # setting is the advantage estimator, not a non-existent top-level ``algorithm``
-# scalar override.
-_ADV_ESTIMATOR = {"grpo": "grpo", "ppo": "gae", "rloo": "rloo"}
+# scalar override.  OPD also runs through ``main_ppo``: it is gated by
+# ``distillation.enabled`` and keeps a critic-free estimator for the optional
+# task-reward term.
+_ADV_ESTIMATOR = {"grpo": "grpo", "ppo": "gae", "rloo": "rloo", "opd": "grpo"}
 _CUSTOM_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$")
 _MODULE = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$")
 _FUNCTION = re.compile(r"^[A-Za-z_]\w*$")
 _CUSTOM_PREFIXES = (
     "actor_rollout_ref.", "critic.", "algorithm.", "data.", "trainer.", "reward.",
+    "distillation.",
 )
 _PROTECTED_CUSTOM_KEYS = {
     "actor_rollout_ref.model.path",
@@ -33,6 +36,9 @@ _PROTECTED_CUSTOM_KEYS = {
     # late custom override cannot turn a valid Recipe into a guaranteed
     # runtime failure.
     "actor_rollout_ref.rollout.mode",
+    # The OPD gate is derived from the recipe stage; toggling it out of band
+    # would desynchronize the stage/loss contract.
+    "distillation.enabled",
 }
 
 
@@ -349,6 +355,64 @@ def recipe_to_verl_overrides(recipe: Recipe, data_path: Path, out_path: Path) ->
         put("critic.data_loader_seed", recipe.train.seed)
         put("critic.fsdp.dtype", dtype)
         put("critic.fsdp.seed", recipe.train.seed)
+
+    if recipe.stage == "opd":
+        # On-policy distillation runs through main_ppo behind the
+        # ``distillation.enabled`` gate.  The teacher defaults to the student's
+        # base model, which is also VERL's documented smoke/debug setup (the
+        # distillation loss is then approximately zero).
+        teacher_model = meta.get("teacher_model", recipe.base_model)
+        if not isinstance(teacher_model, str) or not teacher_model.strip():
+            raise IRValidationError("recipe.meta.verl.teacher_model must be a non-empty string")
+        teacher_gpus = _positive_int(
+            meta.get("teacher_n_gpus_per_node", 1), "recipe.meta.verl.teacher_n_gpus_per_node"
+        )
+        teacher_nnodes = _positive_int(
+            meta.get("teacher_nnodes", 1), "recipe.meta.verl.teacher_nnodes"
+        )
+        teacher_tp = _positive_int(
+            meta.get("teacher_tensor_model_parallel_size", 1),
+            "recipe.meta.verl.teacher_tensor_model_parallel_size",
+        )
+        teacher_gpu_memory = _number_in_range(
+            meta.get("teacher_gpu_memory_utilization", gpu_memory),
+            "recipe.meta.verl.teacher_gpu_memory_utilization", 0.0, 1.0,
+        )
+        loss_mode = meta.get("distillation_loss_mode", "k3")
+        use_pg = meta.get("distillation_use_policy_gradient", False)
+        use_task_rewards = meta.get("distillation_use_task_rewards", False)
+        for flag_name, flag in (
+            ("distillation_use_policy_gradient", use_pg),
+            ("distillation_use_task_rewards", use_task_rewards),
+        ):
+            if not isinstance(flag, bool):
+                raise IRValidationError(f"recipe.meta.verl.{flag_name} must be a boolean")
+        if not isinstance(loss_mode, str) or not loss_mode.strip():
+            raise IRValidationError("recipe.meta.verl.distillation_loss_mode must be a non-empty string")
+        if loss_mode == "k1" and not use_pg:
+            # Mirrors VERL's own validation: k1 has no gradient path through
+            # the teacher logprob, so direct backprop is rejected upstream.
+            raise IRValidationError(
+                "distillation_loss_mode='k1' requires distillation_use_policy_gradient=true"
+            )
+        put("distillation.enabled", True)
+        put("distillation.n_gpus_per_node", teacher_gpus)
+        put("distillation.nnodes", teacher_nnodes)
+        put("distillation.teacher_models.teacher_model.model_path", teacher_model)
+        put("distillation.teacher_models.teacher_model.inference.name", recipe.rl.rollout_engine)
+        put("distillation.teacher_models.teacher_model.inference.tensor_model_parallel_size", teacher_tp)
+        put("distillation.teacher_models.teacher_model.inference.gpu_memory_utilization", teacher_gpu_memory)
+        put("distillation.distillation_loss.loss_mode", loss_mode)
+        put("distillation.distillation_loss.use_policy_gradient", use_pg)
+        put("distillation.distillation_loss.use_task_rewards", use_task_rewards)
+        if use_task_rewards:
+            put(
+                "distillation.distillation_loss.distillation_loss_coef",
+                _positive_number(
+                    meta.get("distillation_loss_coef", 1.0),
+                    "recipe.meta.verl.distillation_loss_coef",
+                ),
+            )
 
     if recipe.peft is not None and recipe.peft.type == "lora":
         _positive_int(recipe.peft.r, "recipe.peft.r")

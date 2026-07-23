@@ -129,12 +129,12 @@ from ..errors import IRValidationError
 #: Bump whenever the Recipe schema changes in a breaking way.
 RECIPE_SCHEMA_VERSION = 1
 
-Stage = Literal["sft", "dpo", "kto", "grpo", "ppo", "rloo"]
+Stage = Literal["sft", "dpo", "kto", "grpo", "ppo", "rloo", "opd"]
 Precision = Literal["bf16", "fp16", "fp8"]
 PEFTType = Literal["lora", "qlora", "full"]
 
-_STAGES = {"sft", "dpo", "kto", "grpo", "ppo", "rloo"}
-_RL_STAGES = {"grpo", "ppo", "rloo"}
+_STAGES = {"sft", "dpo", "kto", "grpo", "ppo", "rloo", "opd"}
+_RL_STAGES = {"grpo", "ppo", "rloo", "opd"}
 _PRECISIONS = {"bf16", "fp16", "fp8"}
 _PEFT_TYPES = {"lora", "qlora", "full"}
 _ROLLOUT_ENGINES = {"vllm", "sglang"}

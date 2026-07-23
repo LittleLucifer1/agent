@@ -90,3 +90,38 @@ def test_verl_smoke_recipe_renders_08_contract(
     reward_path = Path(reward_value)
     assert reward_path.is_absolute() and reward_path.samefile(SMOKE / "reward.py")
     assert overrides["reward.custom_reward_function.name"] == "compute_score"
+
+
+def test_verl_opd_smoke_recipe_enables_distillation(tmp_path, monkeypatch):
+    parquet = pytest.importorskip("pyarrow.parquet")
+    monkeypatch.chdir(ROOT)
+    recipe = Recipe.from_yaml(SMOKE / "verl_opd.yaml")
+    assert recipe.stage == "opd"
+    adapter = VerlAdapter()
+    data_path = adapter.prepare_data(
+        iter_samples_from_jsonl(SMOKE / "verl_opd.jsonl"), recipe, tmp_path
+    )
+    config_path = adapter.prepare_config(recipe, data_path, tmp_path)
+    overrides = dict(
+        line.split("=", 1)
+        for line in config_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    )
+
+    table = parquet.read_table(data_path)
+    # Generation batch (train_batch_size * rollout.n) must divide across
+    # VERL's default of 8 agent loop workers.
+    assert table.num_rows == 8
+    assert overrides["data.train_batch_size"] == "8"
+    assert overrides["actor_rollout_ref.rollout.n"] == "1"
+    assert overrides["algorithm.adv_estimator"] == "grpo"
+    assert overrides["distillation.enabled"] == "true"
+    assert (
+        overrides["distillation.teacher_models.teacher_model.model_path"]
+        == recipe.base_model
+    )
+    assert overrides["distillation.distillation_loss.loss_mode"] == "k3"
+    assert overrides["distillation.distillation_loss.use_task_rewards"] == "false"
+    assert overrides["actor_rollout_ref.actor.use_kl_loss"] == "false"
+    assert overrides["algorithm.use_kl_in_reward"] == "false"
+    assert overrides["critic.enable"] == "false"
